@@ -1,0 +1,1736 @@
+---
+title: "Creativity-AI"
+author: "Claudia Alvarez-Martin, Dan Dediu"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    toc: yes
+    toc_depth: 6
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+    highlight: tango
+    theme: cerulean
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+knit: (function(input, ...) {
+    )
+    rmarkdown::render(
+      input,
+      output_dir = "../results"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning = FALSE)
+
+# use the project folder as root directory
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+```
+
+
+```{r libraries and initializations, results='hide', warning=FALSE, message=FALSE}
+# Rmarkdown:
+library(knitr);
+library(pander);
+
+# Load .xlsx data:
+library(readxl);
+
+# Manage data;
+library(tidyr);
+library(dplyr);
+
+# Plotting:
+library(reshape2);
+library(dplyr);
+library(ggplot2);
+library(gridExtra);
+library(sjPlot);
+library(viridis);
+library(ggsignif)
+library(ggpubr)
+
+# Psychometrics:
+library(performance);
+library(factoextra);
+library(NbClust);
+library(mokken);
+library(psych);
+library(lavaan);
+library(lavaanPlot);
+
+# IRR
+library(irr)
+
+# Regression:
+library(lmerTest);
+library(glmmTMB);
+#library(brms);
+library(effects);
+library(emmeans);
+
+# System/parallel processing:
+library(parallel);
+
+# Misc:
+library(benchmarkme);
+
+if(!dir.exists("./cache")) dir.create("./cache", showWarnings=FALSE, recursive=TRUE);
+
+# For parallel processing:
+n_cores <- ifelse(Sys.info()['sysname'] == "Windows", 1, max(detectCores(all.tests=TRUE, logical=FALSE)-1, 1, na.rm=TRUE)); # try to use multiple cores, if running on a non-Windows system
+
+## Set seed for reproducibility:
+set.seed(42);
+
+# Figure and Table caption adapted from https://stackoverflow.com/questions/37116632/rmarkdown-html-number-figures: 
+outputFormat = opts_knit$get("rmarkdown.pandoc.to"); # determine the output format of the document
+if( is.null(outputFormat) ) outputFormat = ""; # probably not run within knittr
+capTabNo = 1; capFigNo = 1; # figure and table caption numbering, for HTML do it manually
+#Function to add the Table Number
+capTab = function(x, supplementary=FALSE, id=TRUE)
+{
+  if(outputFormat == 'html'){
+    #x = paste0("<div class='caption'>**Table ",ifelse(supplementary,"S",""),capTabNo,".** ",x,"</div>")
+    x = paste0("**Table ",ifelse(supplementary,"S",""),capTabNo,".** ",x,"")
+    if( id ) x <- paste0(x, "<a id='Tab",ifelse(supplementary,"S",""),capTabNo,"'/>");
+    capTabNo <<- capTabNo + 1
+  }; x
+}
+#Function to add the Figure Number
+capFig = function(x, show_R_version=TRUE, show_package_versions=NULL, is_map=FALSE, supplementary=FALSE, id=TRUE)
+{
+  if(outputFormat == 'html')
+  {
+    x <- paste0("**Figure ",ifelse(supplementary,"S",""),capFigNo,".** ",x,"");
+    if( show_R_version || (!is.null(show_package_versions) && length(show_package_versions) > 0) )
+    {
+      x <- paste0(x, " Figure generated using ");
+      if( show_R_version ) x <- paste0(x, stringr::str_replace(R.version.string, stringr::fixed("R "), "[`R`](https://www.r-project.org/) "));
+      if( !is.null(show_package_versions) && length(show_package_versions) > 0 )
+      {
+        x <- paste0(x, ifelse( show_R_version, " and ", " "));
+        x <- paste0(x, ifelse( length(show_package_versions) > 1, "packages ", "package "));
+        x <- paste0(x, paste0(vapply(show_package_versions, function(x) paste0("`",x,"`", " (version ", packageVersion(x),")"), character(1)), collapse=", "), ".");
+      }
+      if( is_map ) x <- paste0(x, " Maps are using public domain data from the [Natural Earth project](https://www.naturalearthdata.com/) as provided by the `R` package `maps`.");
+      if( id ) x <- paste0(x, "<a id='Fig",ifelse(supplementary,"S",""),capFigNo,"'/>");
+    }
+    capFigNo <<- capFigNo + 1;
+  }; 
+  x;
+}
+
+```
+
+```{r}
+# Store the labels that we want to use for the different categories
+categoryLabels <- c('Visual Artists', 'Non Artists', 'Human Inspired GenAI', 'Self-Guided GenAI')
+
+scaleVariables <- c('liking', 'vividness', 'originality', 'aesthetics', 'curiosity',  'creativity')
+labels <- c('Liking', 'Vividness', 'Originality', 'Aesthetics', 'Curiosity', 'Creativity')
+
+
+selected_colours <- viridis(6)[c(1:3, 5)]
+
+coloursRaters <- c("#0D0887FF", "#B12A90FF", "#E16462FF")
+
+```
+
+```{r}
+eval_data_cleaning <- FALSE
+```
+
+
+# Loading and preparing the data
+
+The data for this study comes from different sources. First, we have the ratings provided by humam participants, which contain also their demographic information. To this information I will add more detailed data regarding their AReA score. Second, we have the ratings obtained from GPT-4O, both with and without human guidance. Finally, we also performed a "Turing test" where new participants were asked to identify the origin (human or GenAI) of the stimuli used in the rating task.
+
+```{r load human ratings, eval = eval_data_cleaning}
+
+bd <- read_excel('data/raw/combined_data_edited.xlsx') # This excel file was already pre-processed by Silvia
+
+# Change names to something shorter 
+names(bd) <- c('participantId', 'age', 'gender', 'yearsEducation', 'imageId', 
+               'category', 'areaScore', 'liking', 'vividness', 'originality', 
+               'aesthetics', 'curiosity', 'creativityScore')
+
+
+
+bd$category <- factor(bd$category, labels=categoryLabels) 
+
+# We generate a new category variable that divides the sample between Humans and GenAI without considering the subgroups.
+bd$category2 <- factor(ifelse(bd$category %in% categoryLabels[1:2], 'Humans', 'GenAI'), levels=c('Humans', 'GenAI'))
+
+
+## Cleaning demographic variables
+
+# Let's take a look at the gender of participants:
+#table(bd$gender) 
+
+# We see that the contents of the variable are all over the place: participants 
+# have used different ways to input their gender. We must change them in order to sort
+# all results into four variables: male, female, non-binary and other 
+
+bd$gender <- tolower(bd$gender) # switch all to lower case to remove categories
+
+bd$gender[grepl('f', bd$gender)] <- 'Female' # All results that contain 'f' are female
+bd$gender[grepl('mujer', bd$gender)] <- 'Female'
+
+bd$gender[grepl('h', bd$gender)] <- 'Male' # All results that contain 'h' are male
+bd$gender[startsWith(bd$gender, 'm')] <- 'Male' # Now, all results that start with 'm' are male (we have already classified 'Mujer')
+
+bd$gender[bd$gender=='otro'] <- 'Other'
+bd$gender[bd$gender=='non binary'] <- 'Non-binary'
+
+bd$gender <- factor(bd$gender) 
+
+# Fix some typos
+bd$age[bd$age > 100] <- NA
+bd$yearsEducation[bd$yearsEducation > 100] <- NA
+
+
+
+
+# Generate separate database with only demographic data. This will make describing our sample easier
+dm <- unique(bd[,c('participantId', 'age', 'gender', 'yearsEducation', 'areaScore')])
+
+
+
+
+# Although Silvia's data file contains an overall AREA score, we want to have the individual 
+# questions in case we want to make extra analysis with this information. 
+
+# The raw data to calculate the AREA score is in the original individual files. Here we load them and extract the
+# information regarding the individual questions from the AREA questionnaire. This will allow us to 
+# analyze these data in depth and re-calculate the final score using PCA.
+
+filesRaw <- list.files(path='data/raw/XLSX TOTAL UPDATED/', pattern='*.xlsx')
+
+bdArea <- c()
+missingIds <- c()
+
+for (file in filesRaw) {
+  
+  xx <- read_excel(paste0('data/raw/XLSX TOTAL UPDATED/', file))
+  if (sum(is.na(xx$PROLIFIC_PID)) > 0) {
+    xx$PROLIFIC_PID <- unique(xx$PROLIFIC_PID)[1]
+  }
+  xx <- na.omit(xx[,c('PROLIFIC_PID', 'AreaSlider.response')])
+  names(xx) <- c('participantId', 'areaAnswer')
+  xx$areaAnswer <- as.numeric(substr(xx$areaAnswer, 1, 1))
+  xx$areaQuestion <- paste0('q', formatC(1:14, width = 2, flag = "0"))
+  xx <- spread(xx, areaQuestion, areaAnswer)
+  
+  
+  bdArea <- rbind(bdArea, xx)
+}
+ rm(filesRaw, xx)
+
+bdArea$appreciation <- (bdArea$q01 + bdArea$q02 + bdArea$q03 + 
+                          bdArea$q04 + bdArea$q06 + bdArea$q09 + 
+                          bdArea$q13 + bdArea$q14)/8
+
+bdArea$experience <- (bdArea$q08 + bdArea$q11 + bdArea$q12 + bdArea$q13)/4
+
+bdArea$behaviour <- (bdArea$q05 + bdArea$q07 + bdArea$q10)/3
+
+dm <- merge(dm, bdArea, by='participantId', all=T)
+
+# We will also generate a new variable dividing the sample into high and low area scores according to the sample median
+dm$areaGroup <- factor(ifelse(dm$areaScore <= median(dm$areaScore), 'Low', 'High'))
+bd$areaGroup <- factor(ifelse(bd$areaScore <= median(dm$areaScore), 'Low', 'High'))
+
+
+save(dm, file ='data/processed/demographics.RData')
+rm(bdArea)
+
+```
+
+
+
+```{r load gpt ratings, eval = eval_data_cleaning}
+
+
+## Load data ####
+# The results are stored in separate .xlsx files, one for each image, containing 30 ratings per image
+# The code below gathers all these files and generates a single dataframe
+
+
+filesRaw <- list.files(path='data/raw/results-gpt/', pattern='*.xlsx')
+
+bdGpt <- c()
+
+for (file in filesRaw) {
+  
+  xx <- read_excel(paste0('data/raw/results-gpt/', file))
+  xx$id <- 1:nrow(xx)
+  
+  bdGpt <- rbind(bdGpt, xx)
+}
+
+names(bdGpt) <- c('category', 'imageId', 'liking', 'vividness', 'originality', 'aesthetics', 'curiosity', 'gptId')
+rm(filesRaw, xx)
+
+## Factor category ####
+bdGpt$category <- factor(bdGpt$category, labels=categoryLabels) # CHECK WITH SILVIA: ADD LABELS
+bdGpt$category2 <- factor(ifelse(bdGpt$category %in% categoryLabels[1:2], 'Humans', 'GenAI'), levels=c('Humans', 'GenAI'))
+
+
+
+
+
+
+```
+
+
+
+```{r guided GPT ratings, eval = eval_data_cleaning}
+
+# Following one of the reviewer's comments we decided to run a new batch of GPT ratings, this time, using 
+# some of the human ratings as guidance. 
+
+# In this case, the data are stored in separate .xlsx files. 
+# Some of the files were empty due to a problem with the GPT script. In this first loop I 
+# identify which files are empty and remove them from the files list that will be imported later.
+
+filesRaw <- list.files(path='data/raw/results_with_refimages/results_with_refimages/', pattern='*.xlsx', recursive=TRUE)
+
+bdGptRef <- c()
+listResponses <- c()
+
+for (file in filesRaw) {
+  
+  xx <- read_excel(paste0('data/raw/results_with_refimages/results_with_refimages/', file))
+
+  listResponses <- rbind(listResponses, c(file, nrow(xx)))
+  
+}
+
+
+listResponsesDb <- as.data.frame(listResponses)
+listResponsesDb$V2 <- as.numeric(listResponsesDb$V2)
+
+to_remove <- listResponsesDb$V1[listResponsesDb$V2 == 0]
+
+filesRawComplete <- filesRaw[!(filesRaw %in% to_remove)] # keep only files with responses in them
+
+# Note: not all of the files will have 30 ratings in them. Due to problems with the GPT script,
+# some of the images have raings divided into different files. This is not a problem since in the 
+# final dataset they will be identified by image name.
+
+bdGptRef <- c()
+
+
+for (file in filesRawComplete) {
+  
+  xx <- read_excel(paste0('data/raw/results_with_refimages/results_with_refimages/', file))
+  xx$id <- 1:nrow(xx)
+  
+  bdGptRef <- rbind(bdGptRef, xx)
+  
+
+}
+
+names(bdGptRef)[1:7] <- c('category', 'imageId', 'liking', 'vividness', 'originality', 'aesthetics', 'curiosity')
+
+bdGptRef$category <- ifelse(bdGptRef$category=='category1', categoryLabels[1], 
+                            ifelse(bdGptRef$category=='category2', categoryLabels[2], 
+                                   ifelse(bdGptRef$category=='category3', categoryLabels[3], categoryLabels[4])))
+
+bdGptRef$category <- factor(bdGptRef$category, levels = categoryLabels)
+
+
+bdGptRefWhole <- bdGptRef
+
+bdGptRef <- bdGptRef[,1:7]
+
+bdGptRef$rater <- 'GPT-REF'
+
+```
+
+
+
+```{r merge all databases, eval = eval_data_cleaning}
+
+# One of the Visual artists that generated the images was missclassified as a Non-artist. Here I change
+# the category of their pictures
+
+imagesToChange <- c('P29S1.png', 'P29S2.png','P29S3.png','P29S4.png','P29S5.png',
+                    'P29S6.png','P29S7.png','P29S8.png','P29S9.png','P29S10.png','P29S11.png')
+
+bd$category[bd$imageId %in% imagesToChange] <- 'Visual Artists'
+bdGpt$category[bdGpt$imageId %in% imagesToChange] <- 'Visual Artists'
+bdGptRef$category[bdGptRef$imageId %in% imagesToChange] <- 'Visual Artists'
+
+rm(imagesToChange)
+
+
+
+bdHuman <- bd[c('imageId', 'category', 'liking', 'vividness', 'originality', 'aesthetics', 'curiosity', 'participantId')]
+bdGpt <- bdGpt[c('imageId', 'category', 'liking', 'vividness', 'originality', 'aesthetics', 'curiosity')]
+bdGuidedGpt <- bdGptRef[c('imageId', 'category', 'liking', 'vividness', 'originality', 'aesthetics', 'curiosity')]
+
+bdHuman$raterType <- 'Human'
+bdGpt$raterType <- 'GPT'
+bdGuidedGpt$raterType <- 'GuidedGPT'
+
+bdGpt$participantId <- 'GPT'
+bdGuidedGpt$participantId <- 'GuidedGPT'
+
+
+bd <- rbind(bdHuman, bdGpt,bdGuidedGpt)
+
+bd$category2 <- factor(ifelse(bd$category %in% categoryLabels[1:2], 'Humans', 'GenAI'), levels=c('Humans', 'GenAI'))
+bd$raterType <- factor(bd$raterType, levels=c('Human', 'GPT', 'GuidedGPT'))
+
+```
+
+
+```{r generate creativity score, eval = eval_data_cleaning}
+
+# Modified from Dan
+
+  crea.1f <- "
+    creativity =~ liking + vividness + originality + aesthetics + curiosity;
+  ";
+  
+  # configurational invariance:
+  crea.1f.fit <- cfa(crea.1f, data=bd, group="raterType", se="bootstrap", test="bootstrap");
+  # weak invariance:
+  crea.1f.fit.wi <- cfa(crea.1f, data=bd, group="raterType", group.equal="loadings", se="bootstrap", test="bootstrap");
+  # strong invariance:
+  crea.1f.fit.si <- cfa(crea.1f, data=bd, group="raterType", group.equal=c("intercepts", "loadings"), se="bootstrap", test="bootstrap");
+  # model comparison tests
+  lavTestLRT(crea.1f.fit, crea.1f.fit.wi, crea.1f.fit.si); # both p-values are signif. ->  factor loadings and latent means are different between judge types! 
+  
+  # pairwise comparisons between types of judges:
+  # H vs AI:
+  d <- bd[bd$raterType %in% c("Human","GPT"),] %>% mutate(raterType=as.character(raterType));
+  crea.1f.ha.fit <- cfa(crea.1f, data=d, group="raterType", se="bootstrap", test="bootstrap");
+  crea.1f.ha.fit.wi <- cfa(crea.1f, data=d, group="raterType", group.equal="loadings", se="bootstrap", test="bootstrap");
+  crea.1f.ha.fit.si <- cfa(crea.1f, data=d, group="raterType", group.equal=c("intercepts", "loadings"), se="bootstrap", test="bootstrap");
+  lavTestLRT(crea.1f.ha.fit, crea.1f.ha.fit.wi, crea.1f.ha.fit.si); # both p-values are signif. ->  factor loadings and latent means are different between judge types! 
+  
+  # H vs gAI:
+  d <- bd[bd$raterType %in% c("Human","GuidedGPT"),] %>% mutate(raterType=as.character(raterType));
+  crea.1f.hg.fit <- cfa(crea.1f, data=d, group="raterType", se="bootstrap", test="bootstrap");
+  crea.1f.hg.fit.wi <- cfa(crea.1f, data=d, group="raterType", group.equal="loadings", se="bootstrap", test="bootstrap");
+  crea.1f.hg.fit.si <- cfa(crea.1f, data=d, group="raterType", group.equal=c("intercepts", "loadings"), se="bootstrap", test="bootstrap");
+  lavTestLRT(crea.1f.hg.fit, crea.1f.hg.fit.wi, crea.1f.hg.fit.si); # both p-values are signif. ->  factor loadings and latent means are different between judge types! 
+  
+  # AI vs gAI:
+  d <- bd[bd$raterType %in% c("GPT","GuidedGPT"),] %>% mutate(raterType=as.character(raterType));
+  crea.1f.ag.fit <- cfa(crea.1f, data=d, group="raterType", se="bootstrap", test="bootstrap");
+  crea.1f.ag.fit.wi <- cfa(crea.1f, data=d, group="raterType", group.equal="loadings", se="bootstrap", test="bootstrap");
+  crea.1f.ag.fit.si <- cfa(crea.1f, data=d, group="raterType", group.equal=c("intercepts", "loadings"), se="bootstrap", test="bootstrap");
+  lavTestLRT(crea.1f.ag.fit, crea.1f.ag.fit.wi, crea.1f.ag.fit.si); # both p-values are signif. ->  factor loadings and latent means are different between judge types! 
+  
+  # separately for types of judges:
+  crea.1f.fit.hum <- cfa(crea.1f, data=bd[bd$raterType=="Human",], se="bootstrap", test="bootstrap");
+
+  crea.1f.fit.ai <- cfa(crea.1f, data=bd[bd$raterType=="GPT",], se="bootstrap", test="bootstrap");
+
+  crea.1f.fit.gai <- cfa(crea.1f, data=bd[bd$raterType=="GuidedGPT",], se="bootstrap", test="bootstrap");
+
+  # collect and save these results:
+  crea1FA <- list("model"=crea.1f, 
+                  "fit"=crea.1f.fit, "invariance.tests"=lavTestLRT(crea.1f.fit, crea.1f.fit.wi, crea.1f.fit.si), 
+                  "fit.h.ai"  =crea.1f.ha.fit, "invariance.tests.h.ai"=lavTestLRT(crea.1f.ha.fit, crea.1f.ha.fit.wi, crea.1f.ha.fit.si), 
+                  "fit.h.gai" =crea.1f.hg.fit, "invariance.tests.h.gai"=lavTestLRT(crea.1f.hg.fit, crea.1f.hg.fit.wi, crea.1f.hg.fit.si), 
+                  "fit.ai.gai"=crea.1f.ag.fit, "invariance.tests.ai.gai"=lavTestLRT(crea.1f.ag.fit, crea.1f.ag.fit.wi, crea.1f.ag.fit.si), 
+                  "fit.hum"=crea.1f.fit.hum, "fit.ai"=crea.1f.fit.ai, "fit.gai"=crea.1f.fit.gai);
+
+
+
+crea1FA.pred <- lavPredict(crea1FA$fit, type="lv", method="regression", transform=TRUE, append.data=TRUE, assemble=TRUE);
+# check that the order is correct:
+all(vapply(1:nrow(bd), function(i) bd$raterType[i] == crea1FA.pred$raterType[i] && bd$liking[i] == crea1FA.pred$liking[i] && 
+             bd$vividness[i] == crea1FA.pred$vividness[i] && bd$originality[i] == crea1FA.pred$originality[i] && bd$aesthetics[i] == crea1FA.pred$aesthetics[i] && 
+             bd$curiosity[i] == crea1FA.pred$curiosity[i], logical(1)));
+bd$creativity <- crea1FA.pred$creativity;
+bd$creativity <- 1 + (7-1)*(bd$creativity - min(bd$creativity, na.rm=TRUE))/(max(bd$creativity, na.rm=TRUE) - min(bd$creativity, na.rm=TRUE)) 
+# convert it to a 1 to 7 scale to make it directly comparable with the original scales
+
+
+
+save(bd, file = 'data/processed/database-whole.RData')
+```
+
+
+```{r turing test data, eval = eval_data_cleaning}
+
+# load list of images used for the turing test
+
+turingTestImages <- read.delim("data/raw/randomised_image_list.txt", header = F)
+
+turingTestImages$images <- sapply(strsplit(turingTestImages$V1, split = "/"), `[`, 7)
+turingTestImages$category <- sapply(strsplit(turingTestImages$V1, split = "/"), `[`, 6)
+
+turingTestImages$item_number <- 1:nrow(turingTestImages)
+
+# load turing test results
+
+turing <- read_excel("data/raw/TOTAL TURING TEST RESULTS.xlsx" )
+
+# create vector of true responses
+responses <- cbind(1:48, 
+                   c("A. Human", "B. AI", "A. Human", "A. Human", "A. Human", "B. AI", "B. AI", "B. AI", "B. AI", "A. Human", "B. AI", "B. AI", "A. Human", "B. AI", "A. Human", "B. AI", "A. Human", "A. Human", "A. Human", "B. AI", "B. AI", "A. Human", "A. Human", "B. AI", "A. Human", "A. Human", "B. AI", "B. AI", "A. Human", "A. Human", "B. AI", "B. AI", "A. Human", "B. AI", "A. Human", "B. AI", "B. AI", "A. Human", "B. AI", "A. Human", "A. Human", "A. Human", "B. AI", "A. Human", "B. AI", "B. AI", "A. Human", "B. AI"))
+
+names(turing) <- c('participantId', 'studentId', 'score_pc', 'score_n', 'gender', 'age', paste0(rep(c('item_', 'confidence_'), times=48), rep(1:48, each=2)), paste0(rep("q_", times=13), 1:13))
+
+
+
+turing <- turing %>%
+  pivot_longer(
+    cols = matches("^(item|confidence)_"),
+    names_to = c(".value", "item_number"),
+    names_pattern = "(item|confidence)_(\\d+)"
+  )
+
+
+responses <- data.frame(responses)
+names(responses) <- c('item_number', 'answer')
+
+turing <- merge(turing, responses, by='item_number', all.x=T)
+turing$correct <- factor(ifelse(turing$item == turing$answer, 1, 0), levels=c(0, 1), labels=c('Incorrect', 'Correct'))
+turing$confidence <- as.numeric(substr(turing$confidence, 4, 4))
+
+turing <- merge(turing, turingTestImages, by='item_number', all.x=T)
+
+save(turing, file = 'data/processed/turing-test-data.RData')
+
+rm(turingTestImages)
+
+```
+
+
+```{r load already processed data, eval = !eval_data_cleaning}
+
+load('data/processed/database-whole.RData')
+load('data/processed/demographics.RData')
+load('data/processed/turing-test-data.RData')
+
+```
+
+
+
+# 0- Response to the reviewer
+
+
+## Comment 5
+
+
+Original comment: **It would strengthen the study to include multiple human raters evaluating the same images, enabling assessment of inter-rater reliability and reproducibility.**
+
+```{r}
+humans <- subset(bd, bd$raterType=='Human')
+
+```
+
+
+```{r calculate distances and cohens kappas}
+
+# # Removing the names of participants and images and replacing with numbers will make the output more legible
+# 
+# humans$participantId <- as.numeric(factor(humans$participantId))
+# humans$imageId <- as.numeric(factor(humans$imageId))
+# 
+# humans <- humans[,c('participantId', 'imageId', 'liking', 'vividness', 'originality', 'aesthetics', 'curiosity', 'creativity')]
+# 
+# # Generate empty matrices to store the results of the distances between ratings, Cohen's and AREA scores
+# 
+# resultsDistances <- lapply(1:6, matrix, data= NA, nrow=length(unique(humans$participantId)), ncol=length(unique(humans$participantId)))
+# 
+# resultsCohen <- lapply(1:6, matrix, data= NA, nrow=length(unique(humans$participantId)), ncol=length(unique(humans$participantId)))
+# 
+# commonPictures <- matrix(NA,  nrow=length(unique(humans$participantId)), ncol=length(unique(humans$participantId)))
+# 
+# areaDistances <- matrix(NA,  nrow=length(unique(humans$participantId)), ncol=length(unique(humans$participantId)))
+# 
+# # Loop between all pairs of participants
+# for (i in 1:(length(unique(humans$participantId))-1)) {
+#   for (s in (i+1):255-i) {
+#     j <- i + s
+# 
+#     # Keep only the data from the two selected participants
+#     subset <- subset(humans, humans$participantId %in% c(i, j))
+#     # Keep only the images that have been rated by both participants
+#     subsetClean <- na.omit(dcast(melt(subset, id.vars=c("imageId", "participantId")), imageId~variable+participantId))
+# 
+#     if (nrow(subsetClean) > 0) { #if the participants have at least one image in common, calculate distances and Cohen's kappa values
+# 
+#       # To generate the distences, we use the mean of the absolute differences between all ratings for each pair of participants
+#       resultsDistances[[1]][i, j] <- mean(abs(subsetClean[,2] - subsetClean[,3]))
+#       resultsDistances[[2]][i, j] <- mean(abs(subsetClean[,4] - subsetClean[,5]))
+#       resultsDistances[[3]][i, j] <- mean(abs(subsetClean[,6] - subsetClean[,7]))
+#       resultsDistances[[4]][i, j] <- mean(abs(subsetClean[,8] - subsetClean[,9]))
+#       resultsDistances[[5]][i, j] <- mean(abs(subsetClean[,10] - subsetClean[,11]))
+#       resultsDistances[[6]][i, j] <- mean(abs(subsetClean[,12] - subsetClean[,13]))
+# 
+#       # We use the weighted version of Cohen's data, since we are dealing with ordinal variables (except the Creativity score, which is continuous)
+#       resultsCohen[[1]][i, j] <- kappa2(subsetClean[,c(2,3)])$value
+#       resultsCohen[[2]][i, j] <- kappa2(subsetClean[,c(4,5)])$value
+#       resultsCohen[[3]][i, j] <- kappa2(subsetClean[,c(6,7)])$value
+#       resultsCohen[[4]][i, j] <- kappa2(subsetClean[,c(8,9)])$value
+#       resultsCohen[[5]][i, j] <- kappa2(subsetClean[,c(10,11)])$value
+#       resultsCohen[[6]][i, j] <- kappa(subsetClean[,c(12,13)])
+# 
+# 
+#     }
+# 
+#     # The number of common pictures is equal to the number of rows in the subsetted data, since we have removed missing values
+#     commonPictures[i, j] <- nrow(subsetClean)
+# 
+# 
+#     areaDistances[i, j] <- dm$areaScore[i] - dm$areaScore[j]
+# 
+#   }
+# 
+# }
+# 
+# 
+# 
+# save(resultsDistances, file = 'output/results-distances.RData')
+# save(resultsCohen, file = 'output/results-cohen.RData')
+# save(areaDistances, file = 'output/area-distances.RData')
+# save(commonPictures, file = 'output/common-pictures.RData')
+# 
+
+
+
+load(file = 'output/results-distances.RData')
+load(file = 'output/results-cohen.RData')
+load(file = 'output/area-distances.RData')
+load(file = 'output/common-pictures.RData')
+
+```
+
+We will provide some measures to assess Inter-rater reliability and reproducibility. 
+
+The main problem is that most of the participants in the sample received completely different image datasets to rate, making it difficult to calculate inter-rater measures.
+
+Here we can see the number of images in common for each pair of participants:
+
+```{r raw histogram common pictures}
+# We generate a dataframe because we need it for ggplot
+
+dfCommonPictures <- as.data.frame(as.vector(commonPictures)[!is.na(as.vector(commonPictures))])
+names(dfCommonPictures) <- 'value'
+
+ggplot(dfCommonPictures, aes(x=value)) + 
+  geom_histogram() +  theme_minimal() +
+  labs(x='Number of common pictures', y='Number of pairs')
+```
+
+
+We see that the distribution shows some instances where participants rated the same 120 images. We plot again, removing those participants:
+
+```{r selected histogram common pictures}
+
+dfCommonPictures100 <- subset(dfCommonPictures, dfCommonPictures$value < 100)
+
+limitsCommonPictures100 <- c(mean(dfCommonPictures100$value, na.rm=T) - sd(dfCommonPictures100$value, na.rm=T),
+                             mean(dfCommonPictures100$value, na.rm=T) + sd(dfCommonPictures100$value, na.rm=T))
+
+ggplot(dfCommonPictures100, aes(x=value)) + 
+  geom_histogram(bins=40) +  theme_minimal() +
+  labs(x='Number of common pictures', y='Number of pairs')+
+  geom_vline(xintercept = mean(dfCommonPictures100$value, na.rm=T), colour='red')+
+  geom_vline(xintercept = limitsCommonPictures100[1], colour='blue')+
+  geom_vline(xintercept = limitsCommonPictures100[2], colour='blue')
+ 
+```
+
+We can calculate, for the whole sample, Krippendorff's alpha:
+
+```{r kripp.alpha loop}
+# # For the kripp.alpha() function we need a matrix with where each column is a rater and each row is an item:
+# 
+# matrices <- list()
+# irrResults <- c()
+# variables <- c('liking', 'vividness', 'originality', 'aesthetics', 'curiosity')
+# 
+# for (v in 1:length(variables)) {
+# 
+#   matrices[[v]] <- humans[,c('participantId', 'imageId', variables[v])]
+#   matrices[[v]] <- spread(matrices[[v]], imageId, variables[v])
+# 
+#   krippOutput <-  kripp.alpha(t(t(matrices[[v]][,-1])), method = "ordinal") # We need to specify that these are ordinal variables
+#   irrResults <- rbind(irrResults, c(variables[v], krippOutput$subjects, krippOutput$raters, krippOutput$value))
+# 
+# }
+# 
+# 
+# rownames(irrResults) <- irrResults[,1]
+# irrResults <- irrResults[,-1]
+# colnames(irrResults) <- c('Number of images', 'Number of raters', 'Alpha')
+# 
+# save(irrResults, file = 'output/irr-results.RData') # This step is quite time-consuming, so I save the output and just pull it. If we change anything from the code above we will need to run this again and re-store the new version
+
+load(file = 'output/irr-results.RData')
+
+kable(irrResults)
+
+```
+
+Since we have so missing values in the matrix, however, the results obtained are unreliable. We can also computate, for each pair of participants, their Cohen's d value. However, this measure will also be quite unreliable since so many pairs have very few images in common.
+
+```{r histograms cohen}
+
+
+dataframeCohen <- as.data.frame(rbind(cbind(as.vector(resultsCohen[[1]])[!is.na(as.vector(resultsCohen[[1]]))], 'liking'),
+                                          cbind(as.vector(resultsCohen[[2]])[!is.na(as.vector(resultsCohen[[2]]))], 'vividness'),
+                                          cbind(as.vector(resultsCohen[[3]])[!is.na(as.vector(resultsCohen[[3]]))], 'originality'),
+                                          cbind(as.vector(resultsCohen[[4]])[!is.na(as.vector(resultsCohen[[4]]))], 'aesthetics'),
+                                          cbind(as.vector(resultsCohen[[5]])[!is.na(as.vector(resultsCohen[[5]]))], 'curiosity')))
+
+
+names(dataframeCohen) <- c('cohen', 'category')
+dataframeCohen$cohen <- as.numeric(dataframeCohen$cohen)
+dataframeCohen$category <- factor(dataframeCohen$category, levels=c('liking', 'vividness', 'originality', 'aesthetics', 'curiosity'))
+
+
+ggplot(dataframeCohen, aes(x=cohen)) + 
+  geom_histogram() + facet_grid(~category) + theme_classic()
+
+```
+
+A more reliable way of assessing inter-rater reliability in a case like ours, with unequal raters per item and missingness, is using a mixed-effects model to perform variance decomposition. This allows us to estimate the percentage of variance in the ratings attributed to the effect of the raters and the images separately. 
+
+### Mixed effects model
+
+```{r mixed effects model for inter rater reliability}
+
+model_liking <- lmer(liking ~ 1 + (1|imageId) + (1|participantId), data=humans)
+vc_liking <- as.data.frame(VarCorr(model_liking))
+sigma_image_liking <- vc_liking[vc_liking$grp=="imageId","vcov"]
+sigma_rater_liking <- vc_liking[vc_liking$grp=="participantId","vcov"]
+sigma_err_liking   <- attr(VarCorr(model_liking),"sc")^2
+reliability_liking <- sigma_image_liking /
+  (sigma_image_liking + sigma_rater_liking + sigma_err_liking)
+
+model_vividness <- lmer(vividness ~ 1 + (1|imageId) + (1|participantId), data=humans)
+vc_vividness <- as.data.frame(VarCorr(model_vividness))
+sigma_image_vividness <- vc_vividness[vc_vividness$grp=="imageId","vcov"]
+sigma_rater_vividness <- vc_vividness[vc_vividness$grp=="participantId","vcov"]
+sigma_err_vividness   <- attr(VarCorr(model_vividness),"sc")^2
+reliability_vividness <- sigma_image_vividness /
+  (sigma_image_vividness + sigma_rater_vividness + sigma_err_vividness)
+
+model_originality <- lmer(originality ~ 1 + (1|imageId) + (1|participantId), data=humans)
+vc_originality <- as.data.frame(VarCorr(model_originality))
+sigma_image_originality <- vc_originality[vc_originality$grp=="imageId","vcov"]
+sigma_rater_originality <- vc_originality[vc_originality$grp=="participantId","vcov"]
+sigma_err_originality   <- attr(VarCorr(model_originality),"sc")^2
+reliability_originality <- sigma_image_originality /
+  (sigma_image_originality + sigma_rater_originality + sigma_err_originality)
+
+model_aesthetics <- lmer(aesthetics ~ 1 + (1|imageId) + (1|participantId), data=humans)
+vc_aesthetics <- as.data.frame(VarCorr(model_aesthetics))
+sigma_image_aesthetics <- vc_aesthetics[vc_aesthetics$grp=="imageId","vcov"]
+sigma_rater_aesthetics <- vc_aesthetics[vc_aesthetics$grp=="participantId","vcov"]
+sigma_err_aesthetics   <- attr(VarCorr(model_aesthetics),"sc")^2
+reliability_aesthetics <- sigma_image_aesthetics /
+  (sigma_image_aesthetics + sigma_rater_aesthetics + sigma_err_aesthetics)
+
+model_curiosity <- lmer(curiosity ~ 1 + (1|imageId) + (1|participantId), data=humans)
+vc_curiosity <- as.data.frame(VarCorr(model_curiosity))
+sigma_image_curiosity <- vc_curiosity[vc_curiosity$grp=="imageId","vcov"]
+sigma_rater_curiosity <- vc_curiosity[vc_curiosity$grp=="participantId","vcov"]
+sigma_err_curiosity   <- attr(VarCorr(model_curiosity),"sc")^2
+reliability_curiosity <- sigma_image_curiosity /
+  (sigma_image_curiosity + sigma_rater_curiosity + sigma_err_curiosity)
+
+print(cat('Liking: ', reliability_liking,  
+             '\nVividness: ', reliability_vividness, 
+             '\nOriginality: ', reliability_originality, 
+             '\nAesthetics: ', reliability_aesthetics, 
+             '\nCuriosity: ', reliability_curiosity, ''))
+
+```
+
+Reliability is very low (between 10 and 18), meaning that the proportion of total rating variance that is attributable to real differences between images is low. 
+
+We can compute another measure of reliability using a split half technique, that will allow us to estimate how stable the image-level scores are. We will randomly split the ratings of each image into two halves and correlate the mean ratings of both subsets, repeating this operation in order to obtain a distribution and calculate a confidence interval. 
+
+```{r split half function}
+
+split_half_imagewise <- function(df,
+
+                                 image_col = "imageId",
+
+                                 rating_col = "rating",
+
+                                 min_per_half = 2,
+
+                                 n_repeats = 5000,
+
+                                 method = c("spearman", "pearson"),
+
+                                 seed = 42) {
+
+
+
+  method <- match.arg(method)
+
+  set.seed(seed)
+
+
+
+  # Split df into a list of rating vectors by image
+
+  ratings_by_image <- split(df[[rating_col]], df[[image_col]])
+
+
+
+  corrs <- numeric(n_repeats)
+
+  n_images_used <- integer(n_repeats)
+
+
+
+  for (b in seq_len(n_repeats)) {
+
+
+
+    halfA <- numeric(0)
+
+    halfB <- numeric(0)
+
+
+
+    for (img in names(ratings_by_image)) {
+
+      x <- ratings_by_image[[img]]
+
+      m <- length(x)
+
+
+
+      # Need enough ratings to put at least min_per_half in each half
+
+      if (m < 2 * min_per_half) next
+
+
+
+      idx <- sample.int(m, m, replace = FALSE)
+
+      a_idx <- idx[seq_len(floor(m / 2))]
+
+      b_idx <- idx[(floor(m / 2) + 1):m]
+
+
+
+      if (length(a_idx) < min_per_half || length(b_idx) < min_per_half) next
+
+
+
+      halfA[img] <- mean(x[a_idx], na.rm = TRUE)
+
+      halfB[img] <- mean(x[b_idx], na.rm = TRUE)
+
+    }
+
+
+
+    # Align images present in both halves (should be same keys, but be safe)
+
+    common <- intersect(names(halfA), names(halfB))
+
+    n_images_used[b] <- length(common)
+
+
+
+    if (length(common) < 3) {
+
+      corrs[b] <- NA_real_
+
+    } else {
+
+      corrs[b] <- suppressWarnings(
+
+        cor(halfA[common], halfB[common], method = method, use = "complete.obs")
+
+      )
+
+    }
+
+  }
+
+
+
+  corrs <- corrs[!is.na(corrs)]
+
+  n_images_used <- n_images_used[n_images_used > 0]
+
+
+
+  # Spearman–Brown correction to estimate reliability of full aggregation
+
+  sb <- (2 * corrs) / (1 + corrs)
+
+
+
+  list(
+
+    n_repeats_used = length(corrs),
+
+    median_images_per_split = median(n_images_used),
+
+    corr_median = median(corrs),
+
+    corr_ci95 = as.numeric(quantile(corrs, c(0.025, 0.975), na.rm = TRUE)),
+
+    spearman_brown_median = median(sb),
+
+    spearman_brown_ci95 = as.numeric(quantile(sb, c(0.025, 0.975), na.rm = TRUE)),
+
+    corrs = corrs,
+
+    sb = sb
+
+  )
+
+} 
+
+```
+
+```{r split half generation and output}
+
+# humans$rating <- humans$liking
+# 
+# result_liking <- split_half_imagewise(humans,
+# 
+# 
+#                                min_per_half = 2,
+# 
+#                               n_repeats = 5000,
+# 
+#                                method = "spearman",
+# 
+#                                seed = 1)
+# 
+# # print(result_liking[c("n_repeats_used","median_images_per_split",
+# #
+# #                "corr_median","corr_ci95",
+# #
+# #                "spearman_brown_median","spearman_brown_ci95")])
+# #
+# 
+# humans$rating <- humans$vividness
+# 
+# result_vividness <- split_half_imagewise(humans,
+# 
+# 
+#                                min_per_half = 2,
+# 
+#                               n_repeats = 5000,
+# 
+#                                method = "spearman",
+# 
+#                                seed = 1)
+# 
+# # print(result_vividness[c("n_repeats_used","median_images_per_split",
+# #
+# #                "corr_median","corr_ci95",
+# #
+# #                "spearman_brown_median","spearman_brown_ci95")])
+# #
+# 
+# humans$rating <- humans$originality
+# 
+# result_originality <- split_half_imagewise(humans,
+# 
+# 
+#                                min_per_half = 2,
+# 
+#                               n_repeats = 5000,
+# 
+#                                method = "spearman",
+# 
+#                                seed = 1)
+# #
+# # print(result_originality[c("n_repeats_used","median_images_per_split",
+# #
+# #                "corr_median","corr_ci95",
+# #
+# #                "spearman_brown_median","spearman_brown_ci95")])
+# 
+# 
+# humans$rating <- humans$aesthetics
+# 
+# result_aesthetics <- split_half_imagewise(humans,
+# 
+# 
+#                                min_per_half = 2,
+# 
+#                               n_repeats = 5000,
+# 
+#                                method = "spearman",
+# 
+#                                seed = 1)
+# 
+# # print(result_aesthetics[c("n_repeats_used","median_images_per_split",
+# #
+# #                "corr_median","corr_ci95",
+# #
+# #                "spearman_brown_median","spearman_brown_ci95")])
+# #
+# 
+# humans$rating <- humans$curiosity
+# 
+# result_curiosity <- split_half_imagewise(humans,
+# 
+# 
+#                                min_per_half = 2,
+# 
+#                               n_repeats = 5000,
+# 
+#                                method = "spearman",
+# 
+#                                seed = 1)
+# 
+# # print(result_curiosity[c("n_repeats_used","median_images_per_split",
+# #
+# #                "corr_median","corr_ci95",
+# #
+# #                "spearman_brown_median","spearman_brown_ci95")])
+# #
+# 
+# save(result_liking, file = 'output/split-half-liking.RData')
+# save(result_vividness, file = 'output/split-half-vividness.RData')
+# save(result_originality, file = 'output/split-half-originality.RData')
+# save(result_aesthetics, file = 'output/split-half-aesthetics.RData')
+# save(result_curiosity, file = 'output/split-half-curiosity.RData')
+
+
+load('output/split-half-liking.RData')
+load('output/split-half-vividness.RData')
+load('output/split-half-originality.RData')
+load('output/split-half-aesthetics.RData')
+load('output/split-half-curiosity.RData')
+
+
+```
+
+```{r split half output}
+
+rbind(
+c('Liking', paste0(round(result_liking$corr_median,3), " (", round(result_liking$corr_ci95[1], 3), " - ", round(result_liking$corr_ci95[2], 3), ")"),
+paste0(round(result_liking$spearman_brown_median,3), " (", round(result_liking$spearman_brown_ci95[1], 3), " - ", round(result_liking$spearman_brown_ci95[2], 3), ")")),
+c('Vividness', paste0(round(result_vividness$corr_median,3), " (", round(result_vividness$corr_ci95[1], 3), " - ", round(result_vividness$corr_ci95[2], 3), ")"),
+paste0(round(result_vividness$spearman_brown_median,3), " (", round(result_vividness$spearman_brown_ci95[1], 3), " - ", round(result_vividness$spearman_brown_ci95[2], 3), ")")),
+c('Originality', paste0(round(result_originality$corr_median,3), " (", round(result_originality$corr_ci95[1], 3), " - ", round(result_originality$corr_ci95[2], 3), ")"),
+paste0(round(result_originality$spearman_brown_median,3), " (", round(result_originality$spearman_brown_ci95[1], 3), " - ", round(result_originality$spearman_brown_ci95[2], 3), ")")),
+c('Aesthetics', paste0(round(result_aesthetics$corr_median,3), " (", round(result_aesthetics$corr_ci95[1], 3), " - ", round(result_aesthetics$corr_ci95[2], 3), ")"),
+paste0(round(result_aesthetics$spearman_brown_median,3), " (", round(result_aesthetics$spearman_brown_ci95[1], 3), " - ", round(result_aesthetics$spearman_brown_ci95[2], 3), ")")),
+c('Curiosity', paste0(round(result_curiosity$corr_median,3), " (", round(result_curiosity$corr_ci95[1], 3), " - ", round(result_curiosity$corr_ci95[2], 3), ")"),
+paste0(round(result_curiosity$spearman_brown_median,3), " (", round(result_curiosity$spearman_brown_ci95[1], 3), " - ", round(result_curiosity$spearman_brown_ci95[2], 3), ")")))
+
+```
+
+
+In this case, the Spearman-Brown corrected reliability of all 5 subscales oscillates between 0.77 and 0.86, indicating good to strong reliability. 
+
+
+
+## Comment 6
+
+
+```{r data for the correlations between raters}
+
+corr_data <- aggregate(cbind(creativity, liking, vividness, originality, aesthetics, curiosity) ~ imageId + raterType + category, data=bd, FUN=mean)
+
+corr_data <- corr_data %>% 
+   pivot_wider(names_from = raterType, values_from = c(creativity, liking, vividness, originality, aesthetics, curiosity))
+
+corr_data_allcat <- aggregate(cbind(creativity, liking, vividness, originality, aesthetics, curiosity) ~ imageId + raterType , data=bd, FUN=mean)
+
+corr_data_allcat_long <- corr_data_allcat |> pivot_longer(
+  cols = creativity:curiosity,
+  names_to = 'scale',
+  values_to = 'score'
+)
+
+corr_data_allcat_long_wide <- corr_data_allcat_long %>% 
+   pivot_wider(names_from = raterType, values_from = score)
+
+corr_data_allcat_long_wide$scale <- factor(corr_data_allcat_long_wide$scale, levels=c('creativity', 'liking', 'vividness', 'originality', 'aesthetics', 'curiosity'), labels=c('Creativity', 'Liking', 'Vividness', 'Originality', 'Aesthetics', 'Curiosity'))
+
+
+
+(correlationPlotGpt <- ggplot(corr_data_allcat_long_wide, aes(y=Human, x=GPT)) + geom_point() + facet_wrap(~scale, nrow=1) + geom_smooth(method="lm", color='red') + 
+  theme_classic() + stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "*`,`~")), color = "red", geom = "label", p.accuracy=0.001, size=3) + 
+  theme(legend.position = 'none', text=element_text(family ='serif'))+ ylab('Human score') + xlab('GPT Score') + ggtitle(''))
+
+(correlationPlotGuidedGPT <- ggplot(corr_data_allcat_long_wide, aes(y=Human, x=GuidedGPT)) + geom_point() + facet_wrap(~scale, nrow=1) + geom_smooth(method="lm", color='red') + 
+  theme_classic() + stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "*`,`~")), color = "red", geom = "label", p.accuracy=0.001, size=3) + 
+  theme(legend.position = 'none', text=element_text(family ='serif'))+ ylab('Human score') + xlab('Guided GPT Score') + ggtitle(''))
+
+```
+
+
+
+# Main analysis
+
+## Description of the data
+
+
+## Effect of category on the ratings
+
+
+```{r modelling the effect of category on each scale for every type of rater}
+
+raterTypes <- levels(bd$raterType)
+
+modelsCategory <- list()
+modelsCategoryNull <- list()
+modelsCategorySummaries <- list()
+categoryEffect <- list()
+
+for (r in raterTypes) {
+
+  modelsCategory[[r]] <- list()
+
+  for (i in seq_along(scaleVariables)) {
+
+    formulaModel <- as.formula(
+      paste0(scaleVariables[i], " ~ category + (1|imageId)")
+    )
+
+    modelsCategory[[r]][[scaleVariables[i]]] <- lmer(
+      formulaModel,
+      data = bd[bd$raterType == r, ]
+    )
+    
+    formulaModelNull <- as.formula(
+      paste0(scaleVariables[i], " ~  (1|imageId)")
+    )
+    
+    modelsCategoryNull[[r]][[scaleVariables[i]]] <- lmer(
+      formulaModelNull,
+      data = bd[bd$raterType == r, ]
+    )
+    
+    model <- modelsCategory[[r]][[scaleVariables[i]]]
+    
+    modelsCategorySummaries[[r]][[scaleVariables[i]]] <- rbind(c('Fixed effects', '', '', '', '', ''),
+                                 c('', 'Est/Beta', 'SE', '95% CI', 't', 'p value'),
+                                 c('Group', '', '', '', '', ''),
+                                 cbind(c('Intercept', levels(bd$category)[2:4]),
+                                       round(summary(model)$coefficients[,1:2], 2),
+                                       apply( round(confint(model, method='Wald')[3:6,], 2), 1 , paste , collapse = " - " ),
+                                       round(summary(model)$coefficients[,4], 2),
+                                       round(summary(model)$coefficients[,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Random effects', '', '', '', '', ''),
+                                 c('', '', '', '', 'Variance', 'S.D.'),
+                                 c('Image (Intercept)', '', '', '', round(as.data.frame(VarCorr(model))[1,4], 3), round(as.data.frame(VarCorr(model))[1,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Model fit', '', '', '', '', ''),
+                                 c('', '', '', '', 'Marginal', 'Conditional'),
+                                 c('R2', '', '', '', round(performance::r2(model)$R2_marginal,2), round(performance::r2(model)$R2_conditional, 2)))
+    
+    # In order to obtain a value for the effect of each variable in the model, I generate a series
+    # of new models (I call them "Null") that miss one of the regressors each. This way, I can compare
+    # the full model with each of the Nulls and obtain the effect of each of the regressors. As
+    # results, I will report the Chi2, df, p.value, and difference in AIC.
+    
+    modelComparison <- anova(modelsCategory[[r]][[scaleVariables[i]]], modelsCategoryNull[[r]][[scaleVariables[i]]])
+    categoryEffect[[r]][[scaleVariables[i]]] <- paste0('Chi(', modelComparison$Df[2], ')= ', 
+                         round(modelComparison[2,'Chisq'], 2), 
+                         ', p.value = ', round(modelComparison[2,'Pr(>Chisq)'], 3), 
+                         ', Difference AIC = ', round(diff(modelComparison$AIC), 2))
+    
+    
+  }
+}
+
+
+```
+
+
+```{r values for the figures representing the ratings by category for each rater type}
+summaries <- list()
+individualMeans <- list()
+
+summariesBd <- c()
+individualMeansBd <- c()
+
+for (i in 1:length(scaleVariables)) {
+  
+  imageMean <- aggregate(as.formula(paste(scaleVariables[i], ' ~ category + imageId + raterType')), data = bd, FUN = mean)
+  
+  summaries[[i]] <- aggregate(as.formula(paste(scaleVariables[i], ' ~ category + raterType')), data = imageMean, FUN = function(x) c(mn = mean(x), sd = sd(x), ln=length(x) ))
+  
+  summaries[[i]]$sd <- summaries[[i]][,3][,2]
+  summaries[[i]]$len <- summaries[[i]][,3][,3]
+  summaries[[i]]$score <- summaries[[i]][,3][,1]
+  summaries[[i]]$sem <- summaries[[i]]$sd / sqrt(summaries[[i]]$len)
+  summaries[[i]]$ymin <- summaries[[i]]$score - summaries[[i]]$sd
+  summaries[[i]]$ymax <- summaries[[i]]$score + summaries[[i]]$sd
+  summaries[[i]]$category <- factor(summaries[[i]]$category)
+  summaries[[i]]$raterType <- factor(summaries[[i]]$raterType)
+  
+  summaries[[i]]$scale <- scaleVariables[i]
+  summaries[[i]] <- summaries[[i]][,-3]
+  individualMeans[[i]] <- aggregate(as.formula(paste(scaleVariables[i], ' ~ imageId + category + raterType')), data = bd, FUN=mean)
+  names(individualMeans[[i]])[4] <- 'score'
+  individualMeans[[i]][5] <- scaleVariables[i]
+  names(individualMeans[[i]])[5] <- 'scale'
+  
+  summariesBd <- rbind(summariesBd, summaries[[i]])
+  individualMeansBd <- rbind(individualMeansBd, individualMeans[[i]])
+  
+}
+
+# summariesBd <- subset(summariesBd, summariesBd$scale %in% c('liking', 'vividness', 'originality', 'aesthetics', 'curiosity'))
+# individualMeansBd <- subset(individualMeansBd, individualMeansBd$scale %in% c('liking', 'vividness', 'originality', 'aesthetics', 'curiosity'))
+
+summariesBd$scale <- factor(summariesBd$scale, levels=c('liking', 'vividness', 'originality', 'aesthetics', 'curiosity', 'creativity'))
+individualMeansBd$scale <- factor(individualMeansBd$scale, levels=c('liking', 'vividness', 'originality', 'aesthetics', 'curiosity', 'creativity'))
+
+
+
+summariesBd$scale <- factor(summariesBd$scale, 
+                            levels=c('liking', 'vividness', 'originality', 'aesthetics', 'curiosity', 'creativity'),
+                            labels=c('Liking', 'Vividness', 'Originality', 'Aesthetics', 'Curiosity', 'creativity'))
+
+individualMeansBd$scale <- factor(individualMeansBd$scale, 
+                            levels=c('liking', 'vividness', 'originality', 'aesthetics', 'curiosity', 'creativity'),
+                            labels=c('Liking', 'Vividness', 'Originality', 'Aesthetics', 'Curiosity', 'creativity'))
+
+
+```
+
+
+### For human raters
+
+
+```{r results from the human rater models}
+
+# Pairwise comparisons, mainly for the figures
+
+round(summary(pairs(emmeans(modelsCategory$Human$creativity, pairwise ~ category)))$p.value, 3)[c(1,4,6)]
+
+annotation_creativity_human <- c('***', 'n.s.', '***')
+
+rbind(round(summary(pairs(emmeans(modelsCategory$Human$liking, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$Human$vividness, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$Human$originality, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$Human$aesthetics, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$Human$curiosity, pairwise ~ category)))$p.value, 3)[c(1,4,6)])
+
+annotation_df_human <- data.frame(
+  scale = rep(levels(summariesBd$scale)[1:5], each=3),       
+  xmin = rep(c(1,2,3), times=5), xmax = rep(c(2,3,4), times=5),     
+  y_position = rep(c(7.5, 7, 6.5), 5),    
+  annotation = c('***', '**', '***',
+                 '***', '*', '***',
+                 '***', 'n.s.', '***',
+                 '***', 'n.s.', '***',
+                 '***', 'n.s.', '***')  
+)
+
+
+# Model details for the text
+categoryEffect$Human
+
+```
+
+
+
+```{r}
+
+
+(violinPlotHuman <- ggplot(data = individualMeansBd[(individualMeansBd$raterType=='Human' & individualMeansBd$scale=='creativity'),], aes(x=category, y=score, fill=category, colour=category)) + 
+  geom_violin(alpha=0.4) + scale_y_continuous(limits = c(-8, 8), breaks=c(0, 2, 4, 6, 8)) +
+  theme_classic() +
+  scale_fill_manual(values=selected_colours) + 
+  scale_colour_manual(values=selected_colours) +
+  ggnewscale::new_scale_color() +
+  ggnewscale::new_scale_fill() +
+  geom_point(data=individualMeans[[6]][individualMeans[[6]]$raterType=='Human',], aes(y=score, x=category, colour = category), 
+             position = position_jitter(w = 0.35, h = 0), alpha=0.6, size=0.9)+ 
+  scale_colour_manual(values=selected_colours) + 
+  scale_fill_manual(values=selected_colours) + 
+  theme(legend.position='none', text=element_text(family ='serif'), axis.text.x = element_blank())+ 
+  labs(x = '', y ='Mean creativity score') + scale_x_discrete(
+    labels=categoryLabels)+
+  ylim(c(1, 7)) +
+  geom_signif(annotations = annotation_creativity_human, y_position =c(6.5, 6, 5.5),xmin = c(1,2,3), xmax = c(2,3,4),tip_length = 0.05, family = 'serif') + 
+  geom_errorbar(data = summariesBd[summariesBd$raterType=='Human' & summariesBd$scale=='creativity',], 
+                aes(x = category, ymin = ymin, ymax = ymax), inherit.aes=FALSE, 
+                width = 0.2, color = "black", size = 1) +
+  geom_point(data = summariesBd[summariesBd$raterType=='Human' & summariesBd$scale=='creativity',], aes(x = category, y = score), inherit.aes=FALSE,
+             color = "black",  shape = 16))
+
+
+
+
+
+
+
+
+
+annotation_df_human$scale <- factor(annotation_df_human$scale, levels=c('Liking', 'Vividness', 'Originality', 'Aesthetics', 'Curiosity'))
+
+
+
+(plotBarsScalesHuman <-  ggplot() + 
+  geom_bar(data=summariesBd[summariesBd$raterType=='Human' & summariesBd$scale!='creativity',], aes(y=score, x=category, fill=category, color=category), 
+           stat="identity", position=position_dodge(), alpha=0.4)  +
+  scale_fill_manual(values=selected_colours) + 
+  scale_colour_manual(values=selected_colours) +
+  ggnewscale::new_scale_color() +
+  geom_point(data=individualMeansBd[individualMeansBd$raterType=='Human' & individualMeansBd$scale!='creativity',], aes(y=score, x=category, colour = category), 
+             position = position_jitter(w = 0.35, h = 0), size = 0.3) +
+  geom_errorbar(data=summariesBd[summariesBd$raterType=='Human' & summariesBd$scale!='creativity',],aes( x=category, ymin=ymin, ymax=ymax), width=.2,
+                position=position_dodge(.9)) +
+  scale_colour_manual(values=selected_colours) + 
+  theme_classic() + scale_y_continuous(expand = c(0, 0)) + 
+  theme(legend.position = 'none', axis.text.x = element_blank(), text = element_text(family = "serif"), strip.text.x = element_text(), strip.background = element_blank() )+ 
+  labs(x = '', y ='Mean score', title='Humans') + coord_cartesian(ylim = c(0,8)) + facet_grid(~ scale)+
+  geom_signif(
+    data = annotation_df_human,
+    aes(xmin = xmin, xmax = xmax, annotations = annotation, y_position = y_position,  group = interaction(xmin, xmax, scale)),
+    manual = TRUE,
+    tip_length = 0.02, 
+    family='serif'
+  ))
+
+
+
+```
+
+
+
+### For GPT ratings
+
+
+```{r results from the GPT rater models}
+
+# Pairwise comparisons, mainly for the figures
+
+round(summary(pairs(emmeans(modelsCategory$GPT$creativity, pairwise ~ category)))$p.value, 3)[c(1,4,6)]
+
+annotation_creativity_gpt <- c('n.s', 'n.s.', '***')
+
+rbind(round(summary(pairs(emmeans(modelsCategory$GPT$liking, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$GPT$vividness, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$GPT$originality, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$GPT$aesthetics, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$GPT$curiosity, pairwise ~ category)))$p.value, 3)[c(1,4,6)])
+
+
+annotation_df_gpt <- data.frame(
+  scale = rep(levels(summariesBd$scale)[1:5], each=3),       
+  xmin = rep(c(1,2,3), times=5), xmax = rep(c(2,3,4), times=5),     
+  y_position = rep(c(7.5, 7, 6.5), 5),    
+  annotation = c('n.s.', 'n.s.', '***',
+                 'n.s.', '*', '***',
+                 'n.s.', '**', '**',
+                 'n.s.', 'n.s.', '***',
+                 'n.s.', '*', '***')  
+)
+
+# Model details for the text
+categoryEffect$GPT
+
+```
+
+
+
+
+```{r}
+
+(violinPlotGPT <- ggplot(data = individualMeansBd[(individualMeansBd$raterType=='GPT' & individualMeansBd$scale=='creativity'),], aes(x=category, y=score, fill=category, colour=category)) + 
+  geom_violin(alpha=0.4) + scale_y_continuous(limits = c(-8, 8), breaks=c(0, 2, 4, 6, 8)) +
+  theme_classic() +
+  scale_fill_manual(values=selected_colours) + 
+  scale_colour_manual(values=selected_colours) +
+  ggnewscale::new_scale_color() +
+  ggnewscale::new_scale_fill() +
+  geom_point(data=individualMeans[[6]][individualMeans[[6]]$raterType=='GPT',], aes(y=score, x=category, colour = category), 
+             position = position_jitter(w = 0.35, h = 0), alpha=0.6, size=0.9)+ 
+  scale_colour_manual(values=selected_colours) + 
+  scale_fill_manual(values=selected_colours) + 
+  theme(legend.position='none', text=element_text(family ='serif'), axis.text.x = element_blank())+ 
+  labs(x = '', y ='Mean creativity score') + scale_x_discrete(
+    labels=categoryLabels)+
+  ylim(c(1, 7)) +
+  geom_signif(annotations = annotation_creativity_gpt, y_position =c(6.5, 6, 5.5),xmin = c(1,2,3), xmax = c(2,3,4),tip_length = 0.05, family = 'serif') + 
+  geom_errorbar(data = summariesBd[summariesBd$raterType=='GPT' & summariesBd$scale=='creativity',], 
+                aes(x = category, ymin = ymin, ymax = ymax), inherit.aes=FALSE, 
+                width = 0.2, color = "black", size = 1) +
+  geom_point(data = summariesBd[summariesBd$raterType=='GPT' & summariesBd$scale=='creativity',], aes(x = category, y = score), inherit.aes=FALSE,
+             color = "black",  shape = 16))
+
+
+
+
+
+
+annotation_df_gpt$scale <- factor(annotation_df_gpt$scale, levels=c('Liking', 'Vividness', 'Originality', 'Aesthetics', 'Curiosity'))
+
+ 
+ 
+(plotBarsScalesGPT <-  ggplot() + 
+  geom_bar(data=summariesBd[summariesBd$raterType=='GPT' & summariesBd$scale!='creativity',], aes(y=score, x=category, fill=category, color=category), 
+           stat="identity", position=position_dodge(), alpha=0.4)  +
+  scale_fill_manual(values=selected_colours) + 
+  scale_colour_manual(values=selected_colours) +
+  ggnewscale::new_scale_color() +
+  geom_point(data=individualMeansBd[individualMeansBd$raterType=='GPT' & individualMeansBd$scale!='creativity',], aes(y=score, x=category, colour = category), 
+             position = position_jitter(w = 0.35, h = 0), size = 0.3) +
+  geom_errorbar(data=summariesBd[summariesBd$raterType=='GPT' & summariesBd$scale!='creativity',],aes( x=category, ymin=ymin, ymax=ymax), width=.2,
+                position=position_dodge(.9)) +
+  scale_colour_manual(values=selected_colours) + 
+  theme_classic() + scale_y_continuous(expand = c(0, 0)) + 
+  theme(legend.position = 'none', axis.text.x = element_blank(), text = element_text(family = "serif"), strip.text.x = element_text(), strip.background = element_blank() )+ 
+  labs(x = '', y ='Mean score', title='GPT') + coord_cartesian(ylim = c(0, 8)) + facet_grid(~ scale)+
+  geom_signif(
+    data = annotation_df_gpt,
+    aes(xmin = xmin, xmax = xmax, annotations = annotation, y_position = y_position,  group = interaction(xmin, xmax, scale)),
+    manual = TRUE,
+    tip_length = 0.02, 
+    family='serif'
+  ))
+ 
+
+
+
+```
+
+
+
+### For Guided GPT ratings
+
+
+```{r results from the Guided GPT rater models}
+
+# Pairwise comparisons, mainly for the figures
+
+round(summary(pairs(emmeans(modelsCategory$GuidedGPT$creativity, pairwise ~ category)))$p.value, 3)[c(1,4,6)]
+
+annotation_creativity_guidedgpt <- c('***', 'n.s.', '***')
+
+rbind(round(summary(pairs(emmeans(modelsCategory$GuidedGPT$liking, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$GuidedGPT$vividness, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$GuidedGPT$originality, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$GuidedGPT$aesthetics, pairwise ~ category)))$p.value, 3)[c(1,4,6)],
+      round(summary(pairs(emmeans(modelsCategory$GuidedGPT$curiosity, pairwise ~ category)))$p.value, 3)[c(1,4,6)])
+
+
+annotation_df_guidedGPT <- data.frame(
+  scale = rep(levels(summariesBd$scale)[1:5], each=3),       
+  xmin = rep(c(1,2,3), times=5), xmax = rep(c(2,3,4), times=5),     
+  y_position = rep(c(7.5, 7, 6.5), 5),    
+  annotation = c('**', '***', '***',
+                 '*', '***', '***',
+                 '**', '***', '***',
+                 '*', '***', '***',
+                 '**', '***', '***')  
+)
+
+# Model details for the text
+categoryEffect$GuidedGPT
+
+```
+```{r}
+
+(violinPlotGuidedGPT <- ggplot(data = individualMeansBd[(individualMeansBd$raterType=='GuidedGPT' & individualMeansBd$scale=='creativity'),], aes(x=category, y=score, fill=category, colour=category)) + 
+  geom_violin(alpha=0.4) + scale_y_continuous(limits = c(-8, 8), breaks=c(0, 2, 4, 6, 8)) +
+  theme_classic() +
+  scale_fill_manual(values=selected_colours) + 
+  scale_colour_manual(values=selected_colours) +
+  ggnewscale::new_scale_color() +
+  ggnewscale::new_scale_fill() +
+  geom_point(data=individualMeans[[6]][individualMeans[[6]]$raterType=='GuidedGPT',], aes(y=score, x=category, colour = category), 
+             position = position_jitter(w = 0.35, h = 0), alpha=0.6, size=0.9)+ 
+  scale_colour_manual(values=selected_colours) + 
+  scale_fill_manual(values=selected_colours) + 
+  theme(legend.position='none', text=element_text(family ='serif'), axis.text.x = element_blank())+ 
+  labs(x = '', y ='Mean creativity score') + scale_x_discrete(
+    labels=categoryLabels)+
+  ylim(c(1, 7)) +
+  geom_signif(annotations = annotation_creativity_guidedgpt, y_position =c(6.5, 6, 5.5),xmin = c(1,2,3), xmax = c(2,3,4),tip_length = 0.05, family = 'serif') + 
+  geom_errorbar(data = summariesBd[summariesBd$raterType=='GuidedGPT' & summariesBd$scale=='creativity',], 
+                aes(x = category, ymin = ymin, ymax = ymax), inherit.aes=FALSE, 
+                width = 0.2, color = "black", size = 1) +
+  geom_point(data = summariesBd[summariesBd$raterType=='GuidedGPT' & summariesBd$scale=='creativity',], aes(x = category, y = score), inherit.aes=FALSE,
+             color = "black",  shape = 16))
+
+
+
+
+
+
+
+annotation_df_guidedGPT$scale <- factor(annotation_df_guidedGPT$scale, levels=c('Liking', 'Vividness', 'Originality', 'Aesthetics', 'Curiosity'))
+
+  
+(plotBarsScalesGuidedGPT <-  ggplot() + 
+  geom_bar(data=summariesBd[summariesBd$raterType=='GuidedGPT' & summariesBd$scale!='creativity',], aes(y=score, x=category, fill=category, color=category), 
+           stat="identity", position=position_dodge(), alpha=0.4)  + 
+  scale_fill_manual(values=selected_colours) + 
+  scale_colour_manual(values=selected_colours) +
+  ggnewscale::new_scale_color() +
+  geom_point(data=individualMeansBd[individualMeansBd$raterType=='GuidedGPT' & individualMeansBd$scale!='creativity',], aes(y=score, x=category, colour = category), 
+             position = position_jitter(w = 0.35, h = 0), size = 0.3) +
+  geom_errorbar(data=summariesBd[summariesBd$raterType=='GuidedGPT' & summariesBd$scale!='creativity',],aes( x=category, ymin=ymin, ymax=ymax), width=.2,
+                position=position_dodge(.9)) +
+  scale_colour_manual(values=selected_colours) + 
+  theme_classic() + scale_y_continuous() + 
+  theme(legend.position = 'none', axis.text.x = element_blank(), text = element_text(family = "serif"), strip.text.x = element_text(), strip.background = element_blank() )+ 
+  labs(x = '', y ='Mean score', title='Guided GPT') + coord_cartesian(ylim = c(0, 8)) + facet_grid(~ scale)+
+  geom_signif(
+    data = annotation_df_guidedGPT,
+    aes(xmin = xmin, xmax = xmax, annotations = annotation, y_position = y_position,  group = interaction(xmin, xmax, scale)),
+    manual = TRUE,
+    tip_length = 0.02, 
+    family='serif'
+  ))
+
+
+```
+
+
+
+```{r arrange figure 3 for the paper}
+
+legendPlot <-  ggplot() + 
+  geom_bar(data=summariesBd[summariesBd$raterType=='GuidedGPT' & summariesBd$scale!='creativity',], aes(y=score, x=category, fill=category, color=category), 
+           stat="identity", position=position_dodge(), alpha=0.4)  +
+  scale_fill_manual(values=selected_colours, name = "Category") + 
+  scale_colour_manual(values=selected_colours, name = "Category") +
+  ggnewscale::new_scale_color() +
+  geom_point(data=individualMeansBd[individualMeansBd$raterType=='GuidedGPT' & individualMeansBd$scale!='creativity',], aes(y=score, x=category, colour = category), 
+             position = position_jitter(w = 0.35, h = 0), size = 0.3) +
+  geom_errorbar(data=summariesBd[summariesBd$raterType=='GuidedGPT' & summariesBd$scale!='creativity',],aes( x=category, ymin=ymin, ymax=ymax), width=.2,
+                position=position_dodge(.9)) +
+  scale_colour_manual(values=selected_colours, name = "Category") + 
+  theme_classic() + scale_y_continuous() + 
+  theme(legend.position = 'bottom', axis.text.x = element_blank(), text = element_text(family = "serif"), strip.text.x = element_text(), strip.background = element_blank() )+ 
+  labs(x = '', y ='Mean score', title='') + coord_cartesian(ylim = c(0, 8)) + facet_grid(~ scale)+
+  geom_signif(
+    data = annotation_df_guidedGPT,
+    aes(xmin = xmin, xmax = xmax, annotations = annotation, y_position = y_position,  group = interaction(xmin, xmax, scale)),
+    manual = TRUE,
+    tip_length = 0.02, 
+    family='serif'
+  )
+
+
+
+ggarrange(
+ggarrange(violinPlotHuman, plotBarsScalesHuman, nrow=1, widths=c(1.5, 5), labels=c('A', 'B')),
+ggarrange(violinPlotGPT, plotBarsScalesGPT, nrow=1, widths=c(1.5, 5), labels=c('C', 'D')),
+ggarrange(violinPlotGuidedGPT, plotBarsScalesGuidedGPT, nrow=1, widths=c(1.5, 5), labels=c('E', 'F')), 
+get_legend(legendPlot), nrow=4, heights=c(5, 5, 5, 1))
+
+
+```
+
+
+## Differences in ratings between rater types
+
+```{r}
+modelRaterCat <- lmer(creativity ~ raterType * category + (1|imageId), data = bd)
+
+summary(modelRaterCat)
+
+
+
+rbind(c('Fixed effects', '', '', '', '', ''),
+                                 c('', 'Est/Beta', 'SE', '95% CI', 't', 'p value'),
+                                 c('Group', '', '', '', '', ''),
+                                 cbind(c(rownames(summary(modelRaterCat)$coefficients)),
+                                       round(summary(modelRaterCat)$coefficients[,1:2], 2),
+                                       apply( round(confint(modelRaterCat, method='Wald')[3:14,], 2), 1 , paste , collapse = " - " ),
+                                       round(summary(modelRaterCat)$coefficients[,4], 2),
+                                       round(summary(modelRaterCat)$coefficients[,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Random effects', '', '', '', '', ''),
+                                 c('', '', '', '', 'Variance', 'S.D.'),
+                                 c('Image (Intercept)', '', '', '', round(as.data.frame(VarCorr(modelRaterCat))[1,4], 3), round(as.data.frame(VarCorr(modelRaterCat))[1,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Model fit', '', '', '', '', ''),
+                                 c('', '', '', '', 'Marginal', 'Conditional'),
+                                 c('R2', '', '', '', round(performance::r2(modelRaterCat)$R2_marginal,2), round(performance::r2(modelRaterCat)$R2_conditional, 2)))
+
+
+
+emmeans(modelRaterCat, pairwise ~ raterType | category)
+
+
+
+modelRaterCatNullInteraction <- lmer(creativity ~ raterType + category + (1|imageId), data = bd)
+modelRaterCatNullRater <- lmer(creativity ~  category + (1|imageId), data = bd)
+modelRaterCatNullCategory <- lmer(creativity ~ raterType + (1|imageId), data = bd)
+
+
+modelComparison <- anova(modelRaterCat, modelRaterCatNullCategory)
+paste0('Chi(', modelComparison$Df[2], ')= ', 
+        round(modelComparison[2,'Chisq'], 2), 
+        ', p.value = ', round(modelComparison[2,'Pr(>Chisq)'], 3), 
+        ', Difference AIC = ', round(diff(modelComparison$AIC), 2))
+
+
+
+modelComparison <- anova(modelRaterCat, modelRaterCatNullRater)
+paste0('Chi(', modelComparison$Df[2], ')= ', 
+        round(modelComparison[2,'Chisq'], 2), 
+        ', p.value = ', round(modelComparison[2,'Pr(>Chisq)'], 3), 
+        ', Difference AIC = ', round(diff(modelComparison$AIC), 2))
+
+
+modelComparison <- anova(modelRaterCat, modelRaterCatNullInteraction)
+paste0('Chi(', modelComparison$Df[2], ')= ', 
+        round(modelComparison[2,'Chisq'], 2), 
+        ', p.value = ', round(modelComparison[2,'Pr(>Chisq)'], 3), 
+        ', Difference AIC = ', round(diff(modelComparison$AIC), 2))
+
+
+
+```
+
+
+```{r figure effect of rater type and category on creativity}
+
+
+
+bdAgg <- aggregate(creativity ~ imageId + raterType + category, data=bd, FUN=mean)
+
+
+
+
+(plotRaterCategory <- ggplot(bdAgg, aes(x = category, y = creativity, fill = raterType)) +
+  geom_boxplot(outlier.shape=NA, alpha=0.6) +
+  theme_classic(base_size = 14) + 
+  theme(axis.ticks.x = element_blank(), text=element_text(family ='serif'), legend.position='bottom') + 
+  scale_fill_manual(values=coloursRaters, name = 'Rater type')+
+  ylim(c(1, 7)) +
+  geom_signif(annotations = c('***', 'n.s.', '***', '***'), 
+              y_position =c(5.5, 5.5, 5.5, 5.5),
+              xmin = c(0.7,1.7,2.7,3.7), 
+              xmax = c(0.95,1.95, 2.95,3.95),tip_length = 0.01,
+              textsize = 4, family='serif') +
+      geom_signif(annotations = c('***', '***', '***', '***'), 
+              y_position =c(5.5, 5.5, 5.5, 5.5),
+              xmin = c(1.05,2.05, 3.05,4.05), 
+              xmax = c(1.3,2.3, 3.3,4.3),tip_length = 0.01,
+              textsize = 4, family='serif') +
+      geom_signif(annotations = c('**', '***', '***', '***'), 
+              y_position =c(6, 6, 6, 6),
+              xmin = c(0.7,1.7,2.7,3.7), 
+              xmax = c(1.3, 2.3, 3.3, 4.3),tip_length = 0.01,
+              textsize = 4, family='serif') +
+  ylab('Creativity score') + xlab('Category'))
+
+```
+
+```{r arrange figure 4}
+ggarrange(correlationPlotGpt,
+          correlationPlotGuidedGPT,
+          plotRaterCategory,
+          nrow=3, labels = c('A', 'B', 'C'), heights=c(1,1,1.5))
+```
+
+
+
+## Effect of AReA on ratings
+
+
+
+```{r plot area groups}
+humans <- merge(humans, dm, by='participantId', all.x=T)
+modelAreaCat <- lmer(creativity ~ areaGroup * category + (1|imageId), data=humans)
+emmeans(modelAreaCat, pairwise ~  areaGroup)
+
+
+
+rbind(c('Fixed effects', '', '', '', '', ''),
+                                 c('', 'Est/Beta', 'SE', '95% CI', 't', 'p value'),
+                                 c('Group', '', '', '', '', ''),
+                                 cbind(c(rownames(summary(modelAreaCat)$coefficients)),
+                                       round(summary(modelAreaCat)$coefficients[,1:2], 2),
+                                       apply( round(confint(modelAreaCat, method='Wald')[3:10,], 2), 1 , paste , collapse = " - " ),
+                                       round(summary(modelAreaCat)$coefficients[,4], 2),
+                                       round(summary(modelAreaCat)$coefficients[,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Random effects', '', '', '', '', ''),
+                                 c('', '', '', '', 'Variance', 'S.D.'),
+                                 c('Image (Intercept)', '', '', '', round(as.data.frame(VarCorr(modelAreaCat))[1,4], 3), round(as.data.frame(VarCorr(modelAreaCat))[1,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Model fit', '', '', '', '', ''),
+                                 c('', '', '', '', 'Marginal', 'Conditional'),
+                                 c('R2', '', '', '', round(performance::r2(modelAreaCat)$R2_marginal,2), round(performance::r2(modelAreaCat)$R2_conditional, 2)))
+
+
+
+
+
+modelAreaCatNullInteraction <- lmer(creativity ~ areaGroup + category + (1|imageId), data = humans)
+modelAreaCatNullArea <- lmer(creativity ~  category + (1|imageId), data = humans)
+modelAreaCatNullCategory <- lmer(creativity ~ areaGroup + (1|imageId), data = humans)
+
+
+modelComparison <- anova(modelAreaCat, modelAreaCatNullCategory)
+paste0('Chi(', modelComparison$Df[2], ')= ', 
+        round(modelComparison[2,'Chisq'], 2), 
+        ', p.value = ', round(modelComparison[2,'Pr(>Chisq)'], 3), 
+        ', Difference AIC = ', round(diff(modelComparison$AIC), 2))
+
+
+
+modelComparison <- anova(modelAreaCat, modelAreaCatNullArea)
+paste0('Chi(', modelComparison$Df[2], ')= ', 
+        round(modelComparison[2,'Chisq'], 2), 
+        ', p.value = ', round(modelComparison[2,'Pr(>Chisq)'], 3), 
+        ', Difference AIC = ', round(diff(modelComparison$AIC), 2))
+
+
+modelComparison <- anova(modelAreaCat, modelAreaCatNullInteraction)
+paste0('Chi(', modelComparison$Df[2], ')= ', 
+        round(modelComparison[2,'Chisq'], 2), 
+        ', p.value = ', round(modelComparison[2,'Pr(>Chisq)'], 3), 
+        ', Difference AIC = ', round(diff(modelComparison$AIC), 2))
+
+```
+
+
+```{r}
+
+
+bdAggAreaGroups <- aggregate(creativity ~ imageId + areaGroup + category, data=humans, FUN=mean)
+
+(plotArea<-  ggplot(bdAggAreaGroups, aes(x = areaGroup, y = creativity, fill = category)) +
+  geom_boxplot(outlier.shape=NA, alpha=0.6) +
+  theme_classic(base_size = 16) +
+  theme( text=element_text(family ='serif'), legend.position='none') +
+  scale_fill_manual(values=selected_colours, name = 'Category')+
+  ylim(c(1,7)) +
+   geom_signif(annotations = c('***', 'n.s.', '***'), y_position =c(5.5, 5.25, 5),xmin = c(0.7, 0.9, 1.1), xmax = c(0.9, 1.1, 1.3),tip_length = 0.01,textsize = 6, family = 'serif') +
+   geom_signif(annotations = c('***', 'n.s.', '***'), y_position =c(5.5, 5.25, 5),xmin = c(1.7, 1.9, 2.1), xmax = c(1.9, 2.1, 2.3),tip_length = 0.01,textsize = 6, family = 'serif') +
+   geom_signif(annotations = c('', '', '***'), y_position =c(6.2, 6.2, 6.3),xmin = c(0.7, 1.7, 1), xmax = c(1.3, 2.3, 2),tip_length = 0.01,textsize =6, family = 'serif') +
+   ylab('Creativity score') + xlab('AReA group'))
+
+
+
+legendCategory <- ggplot(bd) + geom_bar(aes(x=category, fill=category)) + scale_fill_manual(values=selected_colours) + labs(fill='Category') + theme(legend.position = 'bottom')
+
+
+
+
+```
+
+
+```{r arrange figure x}
+
+ggarrange(plotArea, get_legend(legendCategory + theme(legend.position='bottom', legend.text = element_text(size=13, family='serif'), legend.title = element_text(size=13, family='serif'))),  heights=c(1, 0.09), nrow=2)
+
+```
+
