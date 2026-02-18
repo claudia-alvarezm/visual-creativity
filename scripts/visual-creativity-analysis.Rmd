@@ -34,8 +34,9 @@ knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
 library(knitr);
 library(pander);
 
-# Load .xlsx data:
+# Load and write .xlsx data:
 library(readxl);
+library(openxlsx)
 
 # Manage data;
 library(tidyr);
@@ -50,6 +51,7 @@ library(sjPlot);
 library(viridis);
 library(ggsignif)
 library(ggpubr)
+library(ggrepel)
 
 # Psychometrics:
 library(performance);
@@ -134,7 +136,7 @@ labels <- c('Liking', 'Vividness', 'Originality', 'Aesthetics', 'Curiosity', 'Cr
 
 selected_colours <- viridis(6)[c(1:3, 5)]
 
-coloursRaters <- c("#0D0887FF", "#B12A90FF", "#E16462FF")
+coloursRaters <- plasma(6)[c(1,3,4)]
 
 ```
 
@@ -514,6 +516,238 @@ load('data/processed/turing-test-data.RData')
 
 ```
 
+
+
+```{r histogram figure s1}
+bd.long <- bd %>% melt(measure.vars=c("liking", "vividness", "originality", "aesthetics", "curiosity"), variable.name="question", value.name="value");
+
+bd.long$question <- factor(bd.long$question, levels=c("liking", "vividness", "originality", "aesthetics", "curiosity"), labels=c("Liking", "Vividness", "Originality", "Aesthetics", "Curiosity"))
+
+
+bd.long$raterType <- factor(bd.long$raterType, levels=c('Human', 'GPT', 'GuidedGPT'), labels=c('Human', 'GPT', 'Guided GPT'))
+ggplot(bd.long, aes(x=value)) + 
+               geom_histogram(aes(fill=raterType)) + theme_classic() + 
+               facet_grid(raterType ~ question) + theme(legend.position="none", text=element_text(family='serif')) + xlab('Value') + ylab('Count') + scale_fill_manual(values=coloursRaters)
+```
+
+
+
+
+```{r figura s2}
+
+# Aquesta figura fa servir els pesos etc del PCA
+
+d.gai <- bd[bd$raterType=="GuidedGPT",c("liking", "vividness", "originality", "aesthetics", "curiosity")];
+d.hum <- bd[bd$raterType=="Human",c("liking", "vividness", "originality", "aesthetics", "curiosity")];
+d.ai <- bd[bd$raterType=="GPT",c("liking", "vividness", "originality", "aesthetics", "curiosity")];
+
+names(d.gai) <- names(d.hum) <- names(d.ai) <- c('Liking', 'Vividness', 'Originality', 'Aesthetics', 'Curiosity')
+
+t_pca.gai <- prcomp(d.gai, scale.=TRUE, center=TRUE);
+t_pca.ai <- prcomp(d.ai, scale.=TRUE, center=TRUE);
+t_pca.hum <- prcomp(d.hum, scale.=TRUE, center=TRUE);
+
+
+eig <- get_eig(t_pca.hum)
+
+# Step 3: Build the plot manually
+eig_df <- data.frame(
+  dim = factor(paste0("Dim ", seq_along(eig$variance.percent)), 
+               levels = paste0("Dim ", seq_along(eig$variance.percent))),
+  percent = eig$variance.percent
+)
+
+(plotPcaCompHuman <- ggplot(eig_df, aes(x = dim, y = percent)) +
+    geom_bar(stat = "identity", 
+             fill = coloursRaters[1], 
+             color = coloursRaters[1]) +
+    geom_text(aes(label = paste0(round(percent, 1), "%")),
+              vjust = -0.5,
+              size = 3,               # <== change label font size here
+              family = "serif") +
+    theme_minimal(base_family = "serif") +
+    theme(
+      axis.text = element_text(size = 10),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 12, face = "bold")
+    ) +
+    labs(
+      x = "Dimensions",
+      y = "Percentage of explained variance",
+      title = "Humans"
+    ))
+
+
+
+eig <- get_eig(t_pca.gai)
+
+# Step 3: Build the plot manually
+eig_df <- data.frame(
+  dim = factor(paste0("Dim ", seq_along(eig$variance.percent)), 
+               levels = paste0("Dim ", seq_along(eig$variance.percent))),
+  percent = eig$variance.percent
+)
+
+(plotPcaCompGuidedAI <- ggplot(eig_df, aes(x = dim, y = percent)) +
+    geom_bar(stat = "identity", 
+             fill = coloursRaters[3], 
+             color = coloursRaters[3]) +
+    geom_text(aes(label = paste0(round(percent, 1), "%")),
+              vjust = -0.5,
+              size = 3,               # <== change label font size here
+              family = "serif") +
+    theme_minimal(base_family = "serif") +
+    theme(
+      axis.text = element_text(size = 10),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 12, face = "bold")
+    ) +
+    labs(
+      x = "Dimensions",
+      y = "Percentage of explained variance",
+      title = "Guided GPT"
+    ))
+
+
+
+eig <- get_eig(t_pca.ai)
+
+# Step 3: Build the plot manually
+eig_df <- data.frame(
+  dim = factor(paste0("Dim ", seq_along(eig$variance.percent)), 
+               levels = paste0("Dim ", seq_along(eig$variance.percent))),
+  percent = eig$variance.percent
+)
+
+(plotPcaCompAI <- ggplot(eig_df, aes(x = dim, y = percent)) +
+    geom_bar(stat = "identity", 
+             fill = coloursRaters[2], 
+             color = coloursRaters[2]) +
+    geom_text(aes(label = paste0(round(percent, 1), "%")),
+              vjust = -0.5,
+              size = 3,               # <== change label font size here
+              family = "serif") +
+    theme_minimal(base_family = "serif") +
+    theme(
+      axis.text = element_text(size = 10),
+      axis.title = element_text(size = 12),
+      plot.title = element_text(size = 12, face = "bold")
+    ) +
+    labs(
+      x = "Dimensions",
+      y = "Percentage of explained variance",
+      title = "GPT"
+    ))
+
+
+
+
+
+
+pca <- t_pca.hum
+
+eig <- summary(pca)$importance[2, ] * 100
+
+var <- get_pca_var(pca)
+
+df <- data.frame(
+  x = var$coord[, 1],
+  y = var$coord[, 2],
+  name = rownames(var$coord)
+)
+
+(plotWeightsHuman <-ggplot(df, aes(x, y, label = name)) +
+  geom_segment(
+    aes(x = 0, y = 0, xend = x, yend = y),
+    arrow = arrow(length = unit(0.2, "cm")),
+    color = "black"
+  ) +
+  geom_text_repel(size = 4, family = "serif") +
+  labs(
+    x = paste0("Dim 1 (", round(eig[1], 1), "%)"),
+    y = paste0("Dim 2 (", round(eig[2], 1), "%)")
+  ) +
+  theme_minimal(base_family = "serif")+ 
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank()) + 
+    geom_hline(yintercept=0, linetype="dashed", color = "black") + 
+    geom_vline(xintercept=0, linetype="dashed", color = "black")  )
+
+
+
+
+pca <- t_pca.gai
+
+eig <- summary(pca)$importance[2, ] * 100
+
+var <- get_pca_var(pca)
+
+df <- data.frame(
+  x = var$coord[, 1],
+  y = var$coord[, 2],
+  name = rownames(var$coord)
+)
+
+(plotWeightsGuidedAI <-ggplot(df, aes(x, y, label = name)) +
+  geom_segment(
+    aes(x = 0, y = 0, xend = x, yend = y),
+    arrow = arrow(length = unit(0.2, "cm")),
+    color = "black"
+  ) +
+  geom_text_repel(size = 4, family = "serif") +
+  labs(
+    x = paste0("Dim 1 (", round(eig[1], 1), "%)"),
+    y = paste0("Dim 2 (", round(eig[2], 1), "%)")
+  ) +
+  theme_minimal(base_family = "serif")+ 
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank()) + 
+    geom_hline(yintercept=0, linetype="dashed", color = "black") + 
+    geom_vline(xintercept=0, linetype="dashed", color = "black")  )
+
+
+pca <- t_pca.ai
+
+eig <- summary(pca)$importance[2, ] * 100
+
+var <- get_pca_var(pca)
+
+df <- data.frame(
+  x = var$coord[, 1],
+  y = var$coord[, 2],
+  name = rownames(var$coord)
+)
+
+(plotWeightsAI <-ggplot(df, aes(x, y, label = name)) +
+  geom_segment(
+    aes(x = 0, y = 0, xend = x, yend = y),
+    arrow = arrow(length = unit(0.2, "cm")),
+    color = "black"
+  ) +
+  geom_text_repel(size = 4, family = "serif") +
+  labs(
+    x = paste0("Dim 1 (", round(eig[1], 1), "%)"),
+    y = paste0("Dim 2 (", round(eig[2], 1), "%)")
+  ) +
+  theme_minimal(base_family = "serif") + 
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          panel.background = element_blank()) + 
+    geom_hline(yintercept=0, linetype="dashed", color = "black") + 
+    geom_vline(xintercept=0, linetype="dashed", color = "black")  )
+
+ggarrange(
+ggarrange(plotPcaCompHuman, plotWeightsHuman, labels=c('A', 'B')),
+ggarrange(plotPcaCompAI, plotWeightsAI, labels=c('C', 'D')),
+ggarrange(plotPcaCompGuidedAI, plotWeightsGuidedAI, labels=c('E', 'F')),
+nrow=3)
+
+```
 
 
 # 0- Response to the reviewer
@@ -1238,8 +1472,56 @@ annotation_df_human <- data.frame(
 # Model details for the text
 categoryEffect$Human
 
+
+modelsCategorySummaries$Human$creativity
 ```
 
+
+```{r}
+modelHumanCategory2 <- lmer(creativity ~ category2 + (1|imageId), data=bd[bd$raterType=='Human',])
+modelHumanCategory2Null  <- lmer(creativity ~  (1|imageId), data=bd[bd$raterType=='Human',])
+
+modelComparison <- anova(modelHumanCategory2, modelHumanCategory2Null)
+paste0('Chi(', modelComparison$Df[2], ')= ', 
+        round(modelComparison[2,'Chisq'], 2), 
+        ', p.value = ', round(modelComparison[2,'Pr(>Chisq)'], 3), 
+        ', Difference AIC = ', round(diff(modelComparison$AIC), 2))
+
+emmeans(modelHumanCategory2, pairwise ~  category2)
+
+
+
+modelCategory2HumansSummary <- rbind(c('Fixed effects', '', '', '', '', ''),
+                                 c('', 'Est/Beta', 'SE', '95% CI', 't', 'p value'),
+                                 c('Group', '', '', '', '', ''),
+                                 cbind(c(rownames(summary(modelHumanCategory2)$coefficients)),
+                                       round(summary(modelHumanCategory2)$coefficients[,1:2], 2),
+                                       apply( round(confint(modelHumanCategory2, method='Wald')[3:4,], 2), 1 , paste , collapse = " - " ),
+                                       round(summary(modelHumanCategory2)$coefficients[,4], 2),
+                                       round(summary(modelHumanCategory2)$coefficients[,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Random effects', '', '', '', '', ''),
+                                 c('', '', '', '', 'Variance', 'S.D.'),
+                                 c('Image (Intercept)', '', '', '', round(as.data.frame(VarCorr(modelHumanCategory2))[1,4], 3), round(as.data.frame(VarCorr(modelHumanCategory2))[1,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Model fit', '', '', '', '', ''),
+                                 c('', '', '', '', 'Marginal', 'Conditional'),
+                                 c('R2', '', '', '', round(performance::r2(modelHumanCategory2)$R2_marginal,2), round(performance::r2(modelHumanCategory2)$R2_conditional, 2)))
+
+
+
+```
+
+
+```{r}
+bd$categoryNonArtists <- factor(bd$category, levels(bd$category)[c(2,1,3,4)])
+
+modelHumanCategoryNonArtists <- lmer(creativity ~ categoryNonArtists + (1|imageId), data=bd[bd$raterType=='Human',])
+
+
+
+summary(modelHumanCategoryNonArtists)
+```
 
 
 ```{r}
@@ -1341,6 +1623,40 @@ categoryEffect$GPT
 
 ```
 
+```{r}
+modelGptCategory2 <- lmer(creativity ~ category2 + (1|imageId), data=bd[bd$raterType=='GPT',])
+modelGptCategory2Null  <- lmer(creativity ~  (1|imageId), data=bd[bd$raterType=='GPT',])
+
+modelComparison <- anova(modelGptCategory2, modelGptCategory2Null)
+paste0('Chi(', modelComparison$Df[2], ')= ', 
+        round(modelComparison[2,'Chisq'], 2), 
+        ', p.value = ', round(modelComparison[2,'Pr(>Chisq)'], 3), 
+        ', Difference AIC = ', round(diff(modelComparison$AIC), 2))
+
+emmeans(modelGptCategory2, pairwise ~  category2)
+
+
+
+rbind(c('Fixed effects', '', '', '', '', ''),
+                                 c('', 'Est/Beta', 'SE', '95% CI', 't', 'p value'),
+                                 c('Group', '', '', '', '', ''),
+                                 cbind(c(rownames(summary(modelGptCategory2)$coefficients)),
+                                       round(summary(modelGptCategory2)$coefficients[,1:2], 2),
+                                       apply( round(confint(modelGptCategory2, method='Wald')[3:4,], 2), 1 , paste , collapse = " - " ),
+                                       round(summary(modelGptCategory2)$coefficients[,4], 2),
+                                       round(summary(modelGptCategory2)$coefficients[,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Random effects', '', '', '', '', ''),
+                                 c('', '', '', '', 'Variance', 'S.D.'),
+                                 c('Image (Intercept)', '', '', '', round(as.data.frame(VarCorr(modelGptCategory2))[1,4], 3), round(as.data.frame(VarCorr(modelGptCategory2))[1,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Model fit', '', '', '', '', ''),
+                                 c('', '', '', '', 'Marginal', 'Conditional'),
+                                 c('R2', '', '', '', round(performance::r2(modelGptCategory2)$R2_marginal,2), round(performance::r2(modelGptCategory2)$R2_conditional, 2)))
+
+
+
+```
 
 
 
@@ -1544,7 +1860,7 @@ summary(modelRaterCat)
 
 
 
-rbind(c('Fixed effects', '', '', '', '', ''),
+modelRaterCategorySummary <- rbind(c('Fixed effects', '', '', '', '', ''),
                                  c('', 'Est/Beta', 'SE', '95% CI', 't', 'p value'),
                                  c('Group', '', '', '', '', ''),
                                  cbind(c(rownames(summary(modelRaterCat)$coefficients)),
@@ -1652,7 +1968,7 @@ emmeans(modelAreaCat, pairwise ~  areaGroup)
 
 
 
-rbind(c('Fixed effects', '', '', '', '', ''),
+modelAreaCategorySummary <- rbind(c('Fixed effects', '', '', '', '', ''),
                                  c('', 'Est/Beta', 'SE', '95% CI', 't', 'p value'),
                                  c('Group', '', '', '', '', ''),
                                  cbind(c(rownames(summary(modelAreaCat)$coefficients)),
@@ -1728,9 +2044,53 @@ legendCategory <- ggplot(bd) + geom_bar(aes(x=category, fill=category)) + scale_
 ```
 
 
-```{r arrange figure x}
+```{r arrange figure 6}
 
 ggarrange(plotArea, get_legend(legendCategory + theme(legend.position='bottom', legend.text = element_text(size=13, family='serif'), legend.title = element_text(size=13, family='serif'))),  heights=c(1, 0.09), nrow=2)
 
+```
+
+
+
+```{r save all summary tables into excel}
+
+# by saving the summary tables to excel we will save time moving them to the manuscript in word
+
+
+
+wb <- createWorkbook()
+
+add_table <- function(wb, sheet, data) {
+  addWorksheet(wb, sheet)
+  writeData(wb, sheet, data)
+}
+
+add_table(wb, "Table S1", modelCategory2HumansSummary)
+add_table(wb, "Table S2", modelsCategorySummaries$Human$creativity)
+add_table(wb, "Table S3", modelsCategorySummaries$Human$liking)
+add_table(wb, "Table S4", modelsCategorySummaries$Human$vividness)
+add_table(wb, "Table S5", modelsCategorySummaries$Human$originality)
+add_table(wb, "Table S6", modelsCategorySummaries$Human$aesthetics)
+add_table(wb, "Table S7", modelsCategorySummaries$Human$curiosity)
+
+add_table(wb, "Table S8", modelsCategorySummaries$GPT$creativity)
+add_table(wb, "Table S9", modelsCategorySummaries$GuidedGPT$creativity)
+
+add_table(wb, "Table S10", modelsCategorySummaries$GPT$liking)
+add_table(wb, "Table S11", modelsCategorySummaries$GPT$vividness)
+add_table(wb, "Table S12", modelsCategorySummaries$GPT$originality)
+add_table(wb, "Table S13", modelsCategorySummaries$GPT$aesthetics)
+add_table(wb, "Table S14", modelsCategorySummaries$GPT$curiosity)
+
+add_table(wb, "Table S15", modelsCategorySummaries$GuidedGPT$liking)
+add_table(wb, "Table S16", modelsCategorySummaries$GuidedGPT$vividness)
+add_table(wb, "Table S17", modelsCategorySummaries$GuidedGPT$originality)
+add_table(wb, "Table S18", modelsCategorySummaries$GuidedGPT$aesthetics)
+add_table(wb, "Table S19", modelsCategorySummaries$GuidedGPT$curiosity)
+
+add_table(wb, "Table S20", modelRaterCategorySummary)
+add_table(wb, "Table S22", modelAreaCategorySummary)
+
+saveWorkbook(wb, "results/tables/table-summaries.xlsx", overwrite = TRUE)
 ```
 
