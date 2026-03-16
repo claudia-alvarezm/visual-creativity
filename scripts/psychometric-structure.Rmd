@@ -1,0 +1,2011 @@
+---
+title: "Creativity-AI (v2, post reviews)"
+author: "Dan Dediu"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    toc: yes
+    toc_depth: 6
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+    highlight: tango
+    theme: cerulean
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+bibliography: bibliography.bib
+csl: apa-6th-edition.csl
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, cache=TRUE);
+```
+
+```{r libraries and initializations, results='hide', warning=FALSE, message=FALSE}
+# Rmarkdown:
+library(knitr);
+library(pander);
+
+# Plotting:
+library(reshape2);
+library(dplyr);
+library(ggplot2);
+library(gridExtra);
+library(sjPlot);
+
+# Psychometrics:
+library(performance);
+library(factoextra);
+library(NbClust);
+library(mokken);
+library(psych);
+library(lavaan);
+library(lavaanPlot);
+
+# Regression:
+library(lmerTest);
+library(glmmTMB);
+#library(brms);
+library(effects);
+library(emmeans);
+
+# System/parallel processing:
+library(parallel);
+
+# Misc:
+library(benchmarkme);
+
+if(!dir.exists("./cache")) dir.create("./cache", showWarnings=FALSE, recursive=TRUE);
+
+# For parallel processing:
+n_cores <- ifelse(Sys.info()['sysname'] == "Windows", 1, max(detectCores(all.tests=TRUE, logical=FALSE)-1, 1, na.rm=TRUE)); # try to use multiple cores, if running on a non-Windows system
+
+## Set seed for reproducibility:
+set.seed(42);
+
+# Figure and Table caption adapted from https://stackoverflow.com/questions/37116632/rmarkdown-html-number-figures: 
+outputFormat = opts_knit$get("rmarkdown.pandoc.to"); # determine the output format of the document
+if( is.null(outputFormat) ) outputFormat = ""; # probably not run within knittr
+capTabNo = 1; capFigNo = 1; # figure and table caption numbering, for HTML do it manually
+#Function to add the Table Number
+capTab = function(x, supplementary=FALSE, id=TRUE)
+{
+  if(outputFormat == 'html'){
+    #x = paste0("<div class='caption'>**Table ",ifelse(supplementary,"S",""),capTabNo,".** ",x,"</div>")
+    x = paste0("**Table ",ifelse(supplementary,"S",""),capTabNo,".** ",x,"")
+    if( id ) x <- paste0(x, "<a id='Tab",ifelse(supplementary,"S",""),capTabNo,"'/>");
+    capTabNo <<- capTabNo + 1
+  }; x
+}
+#Function to add the Figure Number
+capFig = function(x, show_R_version=TRUE, show_package_versions=NULL, is_map=FALSE, supplementary=FALSE, id=TRUE)
+{
+  if(outputFormat == 'html')
+  {
+    x <- paste0("**Figure ",ifelse(supplementary,"S",""),capFigNo,".** ",x,"");
+    if( show_R_version || (!is.null(show_package_versions) && length(show_package_versions) > 0) )
+    {
+      x <- paste0(x, " Figure generated using ");
+      if( show_R_version ) x <- paste0(x, stringr::str_replace(R.version.string, stringr::fixed("R "), "[`R`](https://www.r-project.org/) "));
+      if( !is.null(show_package_versions) && length(show_package_versions) > 0 )
+      {
+        x <- paste0(x, ifelse( show_R_version, " and ", " "));
+        x <- paste0(x, ifelse( length(show_package_versions) > 1, "packages ", "package "));
+        x <- paste0(x, paste0(vapply(show_package_versions, function(x) paste0("`",x,"`", " (version ", packageVersion(x),")"), character(1)), collapse=", "), ".");
+      }
+      if( is_map ) x <- paste0(x, " Maps are using public domain data from the [Natural Earth project](https://www.naturalearthdata.com/) as provided by the `R` package `maps`.");
+      if( id ) x <- paste0(x, "<a id='Fig",ifelse(supplementary,"S",""),capFigNo,"'/>");
+    }
+    capFigNo <<- capFigNo + 1;
+  }; 
+  x;
+}
+
+
+# Define a function to partition an item set into mokken scales - lowerbound from .05 to .60 
+# (this tells R to apply aisp to any given data.frame for a set of lowerbounds if you call moscales.for.lowerbounds)
+# ^^^^^^^ change .60 value to higher if you need to see how items behave at higher levels of c 
+# DD: parallelize it and add handle "Error in aisp(x, lowerbound = lowerbound) : no lowerbound provided"
+moscales.for.lowerbounds <- function(x, lowerbounds=seq(from=0.05,to=0.60,by=0.05), ncores=1)
+{
+  if( ncores == 1 )
+  {
+    # run the original version:
+    ret.value <- NULL;
+    for( lowerbound in lowerbounds )
+    {
+      tmp <- aisp( x,  lowerbound=lowerbound );
+      if( is.null(ret.value) )
+      {
+        ret.value <- data.frame( "Item"=rownames(tmp), "Scales."=tmp[,1] );
+      }
+      else
+      {
+        ret.value <- cbind( ret.value, "Scales."=tmp[,1] );
+      }
+      names(ret.value)[ncol(ret.value)] <- paste("c=",sprintf("%.2f",lowerbound),sep="");
+    }
+    rownames(ret.value) <- NULL;
+    ret.value;
+  } else
+  {
+    # run the parallel version:
+    ret.value <- as.data.frame(do.call(cbind, mclapply(lowerbounds, function(lowerbound)
+    {
+      tmp <- NULL;
+      try(tmp <- mokken::aisp( x,  lowerbound=lowerbound ), silent=TRUE);
+      if( is.null(tmp) ){ return (rep(NA,ncol(x))) } else { return (tmp[,1]) }
+    }, mc.cores=ncores)));
+    names(ret.value) <- sprintf("c=%.2f",lowerbounds);
+    return (ret.value);
+  }
+}
+
+```
+
+
+# Questionnaire structure
+
+## Loading and pre-processing the data
+
+```{r results='hide'}
+# load the data:
+dhum  <- read.csv(xzfile("./data/processed/ratings-human.csv.xz"), sep="\t"); # human ratings
+dgpt  <- read.csv(xzfile("./data/processed/ratings-ai.csv.xz"), sep="\t");    # GTP ratings
+dggpt <- read.csv("./data/processed/guided-gpt-ratings.csv", sep="\t");       # human-guided GPT ratings
+
+# let's extract and rename/recode the items:
+ditems <- unique(rbind(dhum[,c("category", "imageId")], dgpt[,c("category", "imageId")]));
+nrow(ditems); # 1000 - fine!
+ditems$subcategory <- ifelse(ditems$category  == "Human Inspired GenAI", "HAI",
+                          ifelse(ditems$category  == "Self-Guided GenAI", "SAI",
+                                 ifelse(ditems$category  == "Visual Artists", "HVA",
+                                        ifelse(ditems$category  == "Non Artists", "HNA",
+                                               NA))));
+ditems$category <- ifelse(ditems$category %in% c("Human Inspired GenAI", "Self-Guided GenAI"), "AI", "H");
+ditems <- ditems[ order(ditems$category, ditems$subcategory, ditems$imageId), ];
+ditems$iID <- vapply(1:nrow(ditems), function(i) sprintf("%s%03d", ditems$subcategory[i], which(ditems$imageId[i] == ditems$imageId[ ditems$subcategory == ditems$subcategory[i] ])), character(1));
+
+# add the new item ids to the databases:
+dhum <- merge(dhum, ditems, by="imageId", all.x=TRUE, all.y=FALSE);
+dhum <- cbind("judge"="human", dhum[,c("iID", "category.y", "subcategory", "liking", "vividness", "originality", "aesthetics", "curiosity",  "participantId")]);
+names(dhum) <- c("judgeType", "itemID", "category", "subcategory", "liking", "vividness", "originality", "aesthetics", "curiosity", "judgeId");
+dgpt <- merge(dgpt, ditems, by="imageId", all.x=TRUE, all.y=FALSE);
+dgpt <- cbind("judge"="AI", dgpt[,c("iID", "category.y", "subcategory", "liking", "vividness", "originality", "aesthetics", "curiosity")],  "participantId"="ai");
+names(dgpt) <- c("judgeType", "itemID", "category", "subcategory", "liking", "vividness", "originality", "aesthetics", "curiosity", "judgeId");
+dggpt <- merge(dggpt, ditems, by="imageId", all.x=TRUE, all.y=FALSE);
+dggpt <- cbind("judge"="gAI", dggpt[,c("iID", "category.y", "subcategory", "liking", "vividness", "originality", "aesthetics", "curiosity")],  "participantId"="gai");
+names(dggpt) <- c("judgeType", "itemID", "category", "subcategory", "liking", "vividness", "originality", "aesthetics", "curiosity", "judgeId");
+
+# merge the datasets, also adding the new item info:
+dall <- rbind(dhum, dgpt, dggpt);
+
+# add the human raters info:
+draters <- read.csv(xzfile("./data/processed/human-raters-info.csv.xz"), sep="\t");
+draters$areaScore <- round(as.numeric(draters$areaScore),2);
+dall <- merge(dall, unique(draters[,c("participantId", "age", "gender", "yearsEducation", "areaScore")]), by.x="judgeId", by.y="participantId", all.x=TRUE, all.y=FALSE);
+names(dall)[11:14] <- c("judgeAge", "judgeGender", "judgeYearsEducation", "judgeAreaScore");
+dall <- dall[,c("itemID", "category", "subcategory", "liking", "vividness", "originality", "aesthetics", "curiosity", "judgeId", "judgeType", "judgeAge", "judgeGender", "judgeYearsEducation", "judgeAreaScore")];
+
+# add the drawing info for the AI-generated drawings:
+daidraw <- read.csv("./data/processed/drawings-info-ai.csv", sep="\t");
+daidraw <- merge(daidraw, ditems, by="imageId", all.x=TRUE, all.y=FALSE);
+daidraw <- daidraw[,c("iID", "category.y", "subcategory", "stimulus")]; names(daidraw) <- c("itemID", "category", "subcategory", "stimulus");
+dall <- merge(dall, daidraw, by=c("itemID", "category", "subcategory"), all.x=TRUE, all.y=FALSE);
+
+# add the drawing and drawer info for the human-drawn drawings:
+dhumdraw <- read.csv("./data/processed/drawings-and-drawers-info-human.csv", sep="\t");
+dhumdraw$areaScore <- round(as.numeric(dhumdraw$areaScore),2);
+dhumdraw <- merge(dhumdraw, ditems, by="imageId", all.x=TRUE, all.y=FALSE);
+dall <- merge(dall, dhumdraw[,c("iID", "category.y", "subcategory", "stimulus", "participantId", "age", "gender", "educationLevel", "artisticField", "numYearsArt", "areaScore")], 
+              by.x=c("itemID", "category", "subcategory"), by.y=c("iID", "category.y", "subcategory"), all.x=TRUE, all.y=FALSE); 
+stopifnot(!any(!is.na(dall$stimulus.x) & !is.na(dall$stimulus.y))); # sanity check: the human and AI drawers should be complementary
+dall$stimulus.x[ is.na(dall$stimulus.x) ] <- dall$stimulus.y[ is.na(dall$stimulus.x) ];
+dall <- dall[,c("itemID", "category", "subcategory", "liking", "vividness", "originality", "aesthetics", "curiosity", "judgeId", "judgeType", "judgeAge", "judgeGender", "judgeYearsEducation", "judgeAreaScore", "stimulus.x", "participantId", "age", "gender", "educationLevel", "artisticField", "numYearsArt", "areaScore")]; 
+
+# use shorter names for the variables (where appropriate)
+names(dall) <- c("iid", "cat", "subcat", "liking", "vivid", "origin", "aesth", "curios", "jid", "jtyp", "jage", "jgen", "jeduc", "jasc", "stim", "did", "dage", "dgen", "deduc", "dfield", "dart", "dasc"); 
+
+# make the variables factors with the right contrasts:
+dall$iid    <- factor(dall$iid);
+dall$cat    <- factor(dall$cat, levels=c("H", "AI"));
+dall$subcat <- factor(dall$subcat, levels=c("HVA", "HNA", "HAI", "SAI"));
+dall$jid    <- factor(dall$jid);
+dall$jtyp   <- factor(dall$jtyp, levels=c("human", "AI", "gAI"));
+dall$jgen   <- factor(dall$jgen, levels=c("Female", "Male", "Non-binary", "Other"));
+dall$stim   <- factor(dall$stim);
+dall$did    <- factor(dall$did);
+dall$dgen   <- factor(dall$dgen, levels=c("Female", "Male"));
+dall$deduc[ dall$deduc %in% c("Bachelors", "Bachelor’s degree", "Bachelor Degree", "Bachelor Degree (grado superior)") ] <- "Bachelors"; dall$deduc  <- factor(dall$deduc, levels=c("High School diploma", "Bachelors", "Master's degree"));
+dall$dfield[ !is.na(dall$dfield) & dall$dfield == "" ] <- NA; dall$dfield <- factor(dall$dfield);
+
+
+# ... and put also in long format:
+dall.long <- dall %>% melt(measure.vars=c("liking", "vivid", "origin", "aesth", "curios"), variable.name="question", value.name="value");
+
+# ... make some of the categorical variables numeric as well:
+dall$jtypb   <- as.numeric(dall$jtyp)-1;
+dall$catb    <- as.numeric(dall$cat)-1;
+dall$subcatb <- as.numeric(dall$subcat %in% c("HVA", "HAI"));
+
+# free the memory:
+rm(dhum, dgpt, dggpt, draters, daidraw, dhumdraw); gc();
+```
+
+
+## Items, judges and conditions
+
+Here we look at the (psychometric) structure of the creativity judgment questionnaire.
+
+This is composed of 5 scales (here called "questions"), "liking", "vividness", "originality", "aesthetics" and "curiosity", denoted henceforth as *liking*, *vivid*, *origin*, *aesth* and *curios*, each measured on a 7-steps Likert scale from 1 ("not at all") to 7 ("extremely"), applied to each of the `nrow(ditems)` drawings (here called "items").
+
+There are three conditions: one involving human raters (henceforth, *human*), another AI ratings (*ai*), and the last involving guided AI ratings (*gai*) which are designed to be as comparable as possible but, given the objective characteristics of the situations, are not identical:
+
+- *human* involved a sample of `r length(unique(dall$jid[dall$jtyp=="human"]))` raters with various characteristics (sex, age...), each rater rating `r mean(table(as.character(dall$jid[ dall$jtyp=="human" ])))` drawings (not all the same, to avoid fatigue, but in such a way as to make sure that each drawing was rated by at least `r min(table(as.character(dall$iid[ dall$jtyp=="human" ])))` judges):
+
+```{r fig.width=5, fig.height=4, fig.cap=capFig("Histogram of how many items have been rated by how many human judges.")}
+hist(table(dall$iid[ dall$jtyp=="human" ]), xlab="# human judges", ylab="number of drawings", main=NULL);
+```
+
+- *ai* and *gai* involved prompting, for each drawing, ChatGPT to rate one of the five questions on the same Likert scale that the humans raters used, repeatedly for `r mean(table(as.character(dall$iid[ dall$jtyp=="AI" ])))` times. 
+
+
+
+## Variables
+
+All in all, we have the following information, organized by a drawing (or *item*) being judged by a given judge:
+
+- `iid`: its unique identifier, composed of its subcategory (see below) and a unique number within the category (factor)
+- `cat`: a factor with two levels, "H" and "AI" denoting how the drawing was generated (by a human or by AI, respectively)
+- `subcat`: a factor with four levels making further distinctions within each category: for "H" it distinguishes between naive ("HNA") and artists ("HVA"), and for "AI", between human-inspired ("HAI") and self-generated ("SAI")
+- `liking`, `vivid`, `origin`, `aesth`, `curios`: the ratings on the five 1-7 Likert scales (numeric)
+- `jid` and `jtyp`: the judge's (scorer's) unique ID (if human) or "ai"/"gai" (if judged by AI), and it's type ("H" for human and "AI"/"gAI" for AI) (factor)
+- `jage`, `jgen`, `jeduc` and `jasc`: for a human judge, their age (in years, numeric), gender (factor), years of education (numeric) and the judge's AReA (Aesthetic Responsiveness to Art) score (numeric)
+- `stim`: the stimulus used to obtain the drawing (factor)
+- `did`, `dage`, `dgen`, `deduc`, `dfield`, `dart`, `dasc`: the drawer info for human drawers: unique ID (factor), age (numeric), gender (factor), level of education (factor with three levels), artistic field of activity for the visual artists (factor) and the number of years of artistic activity (numeric), and the drawer's AReA (Aesthetic Responsiveness to Art) score (numeric)
+- `jtypb`, `catb` and `subcatb`: numeric versions of `jtyp`, `cat` and `subcat` to be used in certain analyses that require numeric data.
+
+
+
+## Distribution of responses
+
+Let's see now how the responses to the 5 questions look like.
+
+```{r fig.width=2*5, fig.height=1*5, fig.cap=capFig("Histograms comparing the scores on the five scales between AI and human raters across categories."), message=FALSE}
+ggplot(dall.long, aes(x=value)) + 
+               geom_histogram(aes(fill=jtyp)) + 
+               facet_grid(jtyp ~ question) + theme(legend.position="none") + ggtitle("For all drawings together");
+```
+
+```{r fig.width=3*5, fig.height=2*5, fig.cap=capFig("Histograms comparing the scores on the five scales between AI and human raters for specific categories and sub-categories."), message=FALSE}
+grid.arrange(ggplot(dall.long[ dall.long$cat=="H", ], aes(x=value)) + 
+               geom_histogram(aes(fill=jtyp)) + 
+               facet_grid(jtyp ~ question) + theme(legend.position="none") + ggtitle("For human drawings"),
+             ggplot(dall.long[ dall.long$subcat=="HNA", ], aes(x=value)) + 
+               geom_histogram(aes(fill=jtyp)) + 
+               facet_grid(jtyp ~ question) + theme(legend.position="none") + ggtitle("For visual artist drawings"),
+             ggplot(dall.long[ dall.long$subcat=="HVA", ], aes(x=value)) + 
+               geom_histogram(aes(fill=jtyp)) + 
+               facet_grid(jtyp ~ question) + theme(legend.position="none") + ggtitle("For naive human drawings"),
+             ggplot(dall.long[ dall.long$cat=="AI", ], aes(x=value)) + 
+               geom_histogram(aes(fill=jtyp)) + 
+               facet_grid(jtyp ~ question) + theme(legend.position="none") + ggtitle("For AI drawings"),
+             ggplot(dall.long[ dall.long$subcat=="SAI", ], aes(x=value)) + 
+               geom_histogram(aes(fill=jtyp)) + 
+               facet_grid(jtyp ~ question) + theme(legend.position="none") + ggtitle("For self-generated AI drawings"),
+             ggplot(dall.long[ dall.long$subcat=="HAI", ], aes(x=value)) + 
+               geom_histogram(aes(fill=jtyp)) + 
+               facet_grid(jtyp ~ question) + theme(legend.position="none") + ggtitle("For human-inspired AI drawings"),
+             ncol=3);
+```
+```{r results='hide'}
+rm(dall.long); gc();
+```
+
+It is absolutely clear that the human and AI raters have very different distributions of their answers on the 1--7 Likert scales, with the AI responses resembling a peaked symmetric distribution centered around the middle of the scale, while human responses are asymmetrically distributed, monotonically decreasing from 1 towards 7, suggesting that the processes underlying the human and AI judgments are **fundamentally different**.
+However, the guided AI responses are *somewhat in between*, but still more similar to AI than to human responses.
+
+
+## Clustering of the scales
+
+Below we show the correlation matrix (with clustering) for the judgments on the 5 scales and the numerically coded category (0=human, 1=AI), separately for the human judges (left) and the AI judge (right):
+
+```{r fig.width=3*2.5, fig.height=1*5, fig.cap=capFig("Correlations matrix with clustering for the human judges only. Left: all drawings by category; middle: only human drawings by subcateogry; right: only AI drawings by subcateogry. The variables are: *catb* = category (0=human, 1=AI), *subcatb* = subcategory (within human, 0=naive, 1=artist; within AI: 0=self, 1=human-inspired), *lik*=liking, *viv*=vividness, *ori*=originality, *aes*=aesthetics, *cur*=curiosity."), fig.show="hold", out.width="33%"}
+gplots::heatmap.2(d <- cor(dall[ dall$jtyp=="human", c("liking", "vivid", "origin", "aesth", "curios", "catb")], 
+                      method="pearson", use="pairwise.complete.obs"),
+                  cellnote=round(d,2), notecol="black", margins=c(4,4), main="Human judges");
+gplots::heatmap.2(d <- cor(dall[ dall$jtyp=="human" & dall$cat=="H", c("liking", "vivid", "origin", "aesth", "curios", "subcatb")], 
+                      method="pearson", use="pairwise.complete.obs"), 
+                  cellnote=round(d,2), notecol="black", margins=c(4,4), main="Human judges on humans");
+gplots::heatmap.2(d <- cor(dall[ dall$jtyp=="human" & dall$cat=="AI", c("liking", "vivid", "origin", "aesth", "curios", "subcatb")], 
+                       method="pearson", use="pairwise.complete.obs"),  
+                   cellnote=round(d,2),  notecol="black", margins=c(4,4), main="Human judges on AI");
+```
+```{r fig.width=3*2.5, fig.height=1*5, fig.cap=capFig("Correlations matrix with clustering for the AI judges only. Left: all drawings by category; middle: only human drawings by subcateogry; right: only AI drawings by subcateogry. The variables are: *catb* = category (0=human, 1=AI), *subcatb* = subcategory (within human, 0=naive, 1=artist; within AI: 0=self, 1=human-inspired), *lik*=liking, *viv*=vividness, *ori*=originality, *aes*=aesthetics, *cur*=curiosity."), fig.show="hold", out.width="33%"}
+gplots::heatmap.2(d <- cor(dall[ dall$jtyp=="AI", c("liking", "vivid", "origin", "aesth", "curios", "catb")], 
+                      method="pearson", use="pairwise.complete.obs"),
+                  cellnote=round(d ,2), notecol="black", margins=c(4,4), main="AI judges");
+gplots::heatmap.2(d <- cor(dall[ dall$jtyp=="AI" & dall$cat=="H", c("liking", "vivid", "origin", "aesth", "curios", "subcatb")], 
+                      method="pearson", use="pairwise.complete.obs"), 
+                  cellnote=round(d,2), notecol="black", margins=c(4,4), main="AI judges on humans");
+gplots::heatmap.2(d <- cor(dall[ dall$jtyp=="AI" & dall$cat=="AI", c("liking", "vivid", "origin", "aesth", "curios", "subcatb")], 
+                      method="pearson", use="pairwise.complete.obs"),
+                  cellnote=round(d,2),  notecol="black", margins=c(4,4), main="AI judges on AI");
+```
+```{r fig.width=3*2.5, fig.height=1*5, fig.cap=capFig("Correlations matrix with clustering for the guided AI judges only. Left: all drawings by category; middle: only human drawings by subcateogry; right: only AI drawings by subcateogry. The variables are: *catb* = category (0=human, 1=AI), *subcatb* = subcategory (within human, 0=naive, 1=artist; within AI: 0=self, 1=human-inspired), *lik*=liking, *viv*=vividness, *ori*=originality, *aes*=aesthetics, *cur*=curiosity."), fig.show="hold", out.width="33%"}
+gplots::heatmap.2(d <- cor(dall[ dall$jtyp=="gAI", c("liking", "vivid", "origin", "aesth", "curios", "catb")], 
+                      method="pearson", use="pairwise.complete.obs"),
+                  cellnote=round(d ,2), notecol="black", margins=c(4,4), main="Guided AI judges");
+gplots::heatmap.2(d <- cor(dall[ dall$jtyp=="gAI" & dall$cat=="H", c("liking", "vivid", "origin", "aesth", "curios", "subcatb")], 
+                      method="pearson", use="pairwise.complete.obs"), 
+                  cellnote=round(d,2), notecol="black", margins=c(4,4), main="Guided AI judges on humans");
+gplots::heatmap.2(d <- cor(dall[ dall$jtyp=="gAI" & dall$cat=="AI", c("liking", "vivid", "origin", "aesth", "curios", "subcatb")], 
+                      method="pearson", use="pairwise.complete.obs"),
+                  cellnote=round(d,2),  notecol="black", margins=c(4,4), main="Guided AI judges on AI");
+```
+```{r results='hide'}
+# free the memory:
+gc();
+```
+
+Again, it is clear that the structure if very different between humans and AI:
+
+- for *humans* and *gAI*, the human drawing are consistently rated as having higher scores on all 5 scales (negative correlations of *catb* with all scales), while for the *ai*, human drawings are scored higher only on *aesthetics*, *likeness* and *vividness*,
+- *humans* and *gAI* clearly prefer the drawings of experts (to those of the novices) and of human-inspired AI (to the self-generated AI), while the *AI* seems to not really make a differences between human artists and naive people (sightly preferring the latter), but strongly prefers the human-inspired to the self-generated AI ones,
+- the scales cluster in the same way for the *AI* across categories as ((*originality*, *curiosity*), ((*aesthetics*, *liking*), *vividness*)), for *gAI* as ((((*aesthetics*, *liking*), *curiosity*), *vividness*), *originality*), while for the *human* judges, the structure is different, being ((*originality*, *vividness*), ((*aesthetics*, *curiosity*), *liking*)) for the human drawings, and ((*originality*, *curiosity*), ((*aesthetics*, *liking*), *vividness*)) for the AI generated drawings.
+
+While impressionistic, these finds seem to reinforce the ideas that the human and AI judge the human-generated drawings using different criteria, but the AI-generated drawings using similar criteria, and that gAI is somewhat more similar to humans than to AI.
+
+
+## Clustering of the ratings
+
+Let's see how many clusters there might be in the data:
+
+```{r results='hide', warning=FALSE, message=FALSE}
+library(parameters);
+
+# if( !file.exists("./cache/dclust.rds") )
+# {
+  # computationally very expensive: do it and save it!
+  dall.scales <- dall[, c("liking", "vivid", "origin", "aesth", "curios")];
+  
+  # # elbow (fails for the whole dataset):
+  # dall.clust.elbow <- n_clusters_elbow(dall.scales);
+  # dall.clust.elbow;
+  # plot(dall.clust.elbow);
+  
+  # gap:
+  #dall.clust.gap <- n_clusters_gap(dall.scales); # extrmeely slow even on a very powerful machine
+  #dall.clust.gap;
+  #plot(dall.clust.gap); # between 4 and 6 seems ok
+  
+  # silhouette:
+  #dall.clust.sil <- n_clusters_silhouette(dall.scales); # crashes for all the items ("long vectors (argument 1) are not supported in .C")
+  #dall.clust.sil;
+  #plot(dall.clust.sil); # 2 clusters
+  
+  dall.kmeans.2 <- kmeans(dall[, c("liking", "vivid", "origin", "aesth", "curios")], 2, nstart=100);
+  dall.kmeans.3 <- kmeans(dall[, c("liking", "vivid", "origin", "aesth", "curios")], 3, nstart=100);
+  dall.kmeans.4 <- kmeans(dall[, c("liking", "vivid", "origin", "aesth", "curios")], 4, nstart=100);
+  dall.kmeans.5 <- kmeans(dall[, c("liking", "vivid", "origin", "aesth", "curios")], 5, nstart=100);
+  dall.kmeans.6 <- kmeans(dall[, c("liking", "vivid", "origin", "aesth", "curios")], 6, nstart=100);
+  
+  dall.kmeans <- cbind(dall, 
+                       "k2"=as.factor(paste0("cluster ", 1:2)[dall.kmeans.2$cluster]),
+                       "k3"=as.factor(paste0("cluster ", 1:3)[dall.kmeans.3$cluster]),
+                       "k4"=as.factor(paste0("cluster ", 1:4)[dall.kmeans.4$cluster]),
+                       "k5"=as.factor(paste0("cluster ", 1:5)[dall.kmeans.5$cluster]),
+                       "k6"=as.factor(paste0("cluster ", 1:6)[dall.kmeans.6$cluster]));
+  
+  dclust <- list(#"gap"=dall.clust.gap, "silhouette"=dall.clust.sil, 
+                 "kmeans"=dall.kmeans);
+  
+#   saveRDS(dclust, file="./cache/dclust.rds", compress="xz");
+# }
+
+# z-score the scales scores:
+dclust$kmeans$likingz <- scale(dclust$kmeans$liking, center=TRUE, scale=TRUE);
+dclust$kmeans$vividz  <- scale(dclust$kmeans$vivid, center=TRUE, scale=TRUE);
+dclust$kmeans$originz <- scale(dclust$kmeans$origin, center=TRUE, scale=TRUE);
+dclust$kmeans$aesthz  <- scale(dclust$kmeans$aesth, center=TRUE, scale=TRUE);
+dclust$kmeans$curiosz <- scale(dclust$kmeans$curios, center=TRUE, scale=TRUE);
+```
+
+```{r eval=FALSE, include=FALSE, fig.width=2*4, fig.height=5, fig.cap=capFig("The optimal number of clusters in the entire data using the gap method (left) and the silhouette method (right)."), fig.show="hold", out.width="50%"}
+plot(dclust$gap); # between 4 and 6 seems ok
+plot(dclust$silhouette); # 2 clusters
+```
+
+### k=2 clusters
+
+#### How do judge and category affect the distribution in the clusters?
+
+```{r fig.width=3*5, fig.height=5, fig.cap=capFig("Distribution of responses by cluster and various criteria.")}
+grid.arrange(ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k2, fill=jtyp), color="black", alpha=0.5) + 
+               geom_text(aes(x=k2, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k2, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ cat) + 
+               geom_text(aes(x=k2, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k2, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ subcat) +
+               geom_text(aes(x=k2, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ncol=3);
+```
+
+Cluster 1 seems to contain mostly the human and gAI judgments, while cluster 2 mostly the AI judgments relatively similarly across categories (human- or AI-generated) and subcategories, but let's test this taking into account the proper structure of the data (i.e., random effect of item and judge).
+
+```{r}
+# only jtyp:
+if( !file.exists("./cache/glmer_mk2j.rds") )
+{
+  mk2.j <- glmer(k2 ~ jtyp + (1 | iid) + (1 | jid), data=dclust$kmeans, family=binomial);
+  #summary(mk2.j);
+  saveRDS(mk2.j, file="./cache/glmer_mk2j.rds", compress="xz");
+  mk2.0 <- update(mk2.j, . ~ . - jtyp); anova(mk2.j, mk2.0); # judge type does not seem to have a main effect...
+  saveRDS(mk2.0, file="./cache/glmer_mk20.rds", compress="xz");
+} else
+{
+  mk2.0 <- readRDS("./cache/glmer_mk20.rds");
+  mk2.j <- readRDS("./cache/glmer_mk2j.rds");
+}
+summary(mk2.j);
+icc(mk2.j); # 75%
+plot_model(mk2.j, type="pred", terms=c("jtyp")) + ylab("p(cluster 2)") + ggtitle("Pred. probs. for k=2"); # because gAI is all over the place!
+```
+
+So, it seems that the judge type does not have a main effect, basically because AI and especially gAI is all over the place...
+
+```{r}
+# jtyp & cat:
+if( !file.exists("./cache/glmer_mk2jc.rds") )
+{
+  mk2.jc <- glmer(k2 ~ jtyp * cat + (1 | iid) + (1 | jid), data=dclust$kmeans, family=binomial);
+  #summary(mk2.jc);
+  mk2.jc.noint <- update(mk2.jc, . ~ . - jtyp:cat); anova(mk2.jc, mk2.jc.noint); # the interaction clearly matters!
+  saveRDS(mk2.jc, file="./cache/glmer_mk2jc.rds", compress="xz");
+} else
+{
+  mk2.jc <- readRDS("./cache/glmer_mk2jc.rds");
+}
+summary(mk2.jc);
+anova(mk2.jc, mk2.0); # and improves on the null model!
+anova(mk2.jc, mk2.j); # and on the judge-only model
+plot_model(mk2.jc, type="pred", terms=c("jtyp", "cat")) + ylab("p(cluster 2)") + ggtitle("Pred. probs. for k=2");
+```
+
+On the other hand, there is a clear interaction between jtyp and cat, with the human, and, to a lesser degrees, gAI judges making a distinction between the human- and AI-generated drawings, while the AI judges do not.
+
+```{r}
+# # jtyp & cat:
+# if( !file.exists("./cache/glmer_mk2js.rds") )
+# {
+  mk2.js <- glmer(k2 ~ jtyp * subcat + (1 | iid) + (1 | jid), data=dclust$kmeans, family=binomial);
+  #summary(mk2.js);
+  mk2.js.noint <- update(mk2.js, . ~ . - jtyp:subcat); anova(mk2.js, mk2.js.noint); # the interaction clearly matters!
+   saveRDS(mk2.js, file="./cache/glmer_mk2js.rds", compress="xz");
+# } else
+# {
+#   mk2.js <- readRDS("./cache/glmer_mk2js.rds");
+# }
+summary(mk2.js);
+anova(mk2.js, mk2.0); # and improves on the null model!
+anova(mk2.js, mk2.j); # and on the judge-only model
+plot_model(mk2.js, type="pred", terms=c("jtyp", "subcat")) + ylab("p(cluster 2)") + ggtitle("Pred. probs. for k=2");
+```
+
+Again, humans have a clear hierarchy of judgments, with HVA > HNA ≈ HAI > SAI, but the AI judge does not make any difference, while the gAI seem to follow the human hierarchy, most subcategories overlap a lot. 
+
+
+#### How do the scale scores affect the distribution in the clusters?
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *liking* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=liking)) + 
+              geom_bar(aes(fill=k2), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *vividness* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=vivid)) + 
+              geom_bar(aes(fill=k2), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *originality* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=origin)) + 
+              geom_bar(aes(fill=k2), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *aesthetics* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=aesth)) + 
+              geom_bar(aes(fill=k2), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *curiosity* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=curios)) + 
+              geom_bar(aes(fill=k2), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k2 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+#### Summary
+
+kmeans clustering with k=2 seems to suggest that the main distinction is between a cluster containing mostly human and gAI judgments that make distinctions between categories and subcategories, and a mostly AI judges-category does not make such distinctions.
+
+
+### k=3 clusters
+
+#### How do judge and category affect the distribution in the clusters?
+
+```{r fig.width=3*5, fig.height=5, fig.cap=capFig("Distribution of responses by cluster and various criteria.")}
+grid.arrange(ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k3, fill=jtyp), color="black", alpha=0.5) + 
+               geom_text(aes(x=k3, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k3, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ cat) + 
+               geom_text(aes(x=k3, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k3, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ subcat) +
+               geom_text(aes(x=k3, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ncol=3);
+```
+
+Cluster 1 seems to contain mostly the AI and gAI judgments, cluster 2 human and gAI, and 3 mostly the AI judgments.
+
+#### How do the scale scores affect the distribution in the clusters?
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *liking* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=liking)) + 
+              geom_bar(aes(fill=k3), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *vividness* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=vivid)) + 
+              geom_bar(aes(fill=k3), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *originality* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=origin)) + 
+              geom_bar(aes(fill=k3), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *aesthetics* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=aesth)) + 
+              geom_bar(aes(fill=k3), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *curiosity* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=curios)) + 
+              geom_bar(aes(fill=k3), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k3 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+#### Correspondence k=2 ↔︎ k=3
+
+```{r fig.width=6, fig.height=5, fig.cap=capFig("Correspondence between k=2 (colums) and k=3 (row) clusters.")}
+# correspondence between k=2 and k=3 clusters
+pander(tb_2_3 <- table(dclust$kmeans$k2, dclust$kmeans$k3));
+mosaicplot(tb_2_3, color=TRUE, main="k=2 ↔︎ k=3", las=1);
+```
+
+
+### k=4 clusters
+
+#### How do judge and category affect the distribution in the clusters?
+
+```{r fig.width=3*5, fig.height=5, fig.cap=capFig("Distribution of responses by cluster and various criteria.")}
+grid.arrange(ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k4, fill=jtyp), color="black", alpha=0.5) + 
+               geom_text(aes(x=k4, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k4, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ cat) + 
+               geom_text(aes(x=k4, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k4, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ subcat) +
+               geom_text(aes(x=k4, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ncol=3);
+```
+
+#### How do the scale scores affect the distribution in the clusters?
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *liking* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=liking)) + 
+              geom_bar(aes(fill=k4), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *vividness* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=vivid)) + 
+              geom_bar(aes(fill=k4), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *originality* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=origin)) + 
+              geom_bar(aes(fill=k4), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *aesthetics* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=aesth)) + 
+              geom_bar(aes(fill=k4), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *curiosity* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=curios)) + 
+              geom_bar(aes(fill=k4), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k4 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+#### Correspondence k=3 ↔︎ k=4
+
+```{r fig.width=6, fig.height=5, fig.cap=capFig("Correspondence between k=3 (colums) and k=4 (row) clusters.")}
+# correspondence between k=3 and k=4 clusters
+pander(tb_3_4 <- table(dclust$kmeans$k3, dclust$kmeans$k4));
+mosaicplot(tb_3_4, color=TRUE, main="k=3 ↔︎ k=4", las=1);
+```
+
+
+### k=5 clusters
+
+#### How do judge and category affect the distribution in the clusters?
+
+```{r fig.width=3*5, fig.height=5, fig.cap=capFig("Distribution of responses by cluster and various criteria.")}
+grid.arrange(ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k5, fill=jtyp), color="black", alpha=0.5) + 
+               geom_text(aes(x=k5, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k5, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ cat) + 
+               geom_text(aes(x=k5, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k5, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ subcat) +
+               geom_text(aes(x=k5, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ncol=3);
+```
+
+#### How do the scale scores affect the distribution in the clusters?
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *liking* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=liking)) + 
+              geom_bar(aes(fill=k5), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *vividness* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=vivid)) + 
+              geom_bar(aes(fill=k5), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *originality* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=origin)) + 
+              geom_bar(aes(fill=k5), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *aesthetics* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=aesth)) + 
+              geom_bar(aes(fill=k5), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *curiosity* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=curios)) + 
+              geom_bar(aes(fill=k5), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k5 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+#### Correspondence k=4 ↔︎ k=5
+
+```{r fig.width=6, fig.height=5, fig.cap=capFig("Correspondence between k=4 (colums) and k=5 (row) clusters.")}
+# correspondence between k=4 and k=5 clusters
+pander(tb_4_5 <- table(dclust$kmeans$k4, dclust$kmeans$k5));
+mosaicplot(tb_4_5, color=TRUE, main="k=4 ↔︎ k=5", las=1);
+```
+
+
+### k=6 clusters
+
+#### How do judge and category affect the distribution in the clusters?
+
+```{r fig.width=3*5, fig.height=5, fig.cap=capFig("Distribution of responses by cluster and various criteria.")}
+grid.arrange(ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k6, fill=jtyp), color="black", alpha=0.5) + 
+               geom_text(aes(x=k6, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k6, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ cat) + 
+               geom_text(aes(x=k6, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ggplot(dclust$kmeans) + 
+               geom_bar(aes(x=k6, fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ subcat) +
+               geom_text(aes(x=k6, group=jtyp, label=scales::percent(round(after_stat(count)/sum(after_stat(count)),2))), position=position_stack(vjust=0.5), stat="count") + 
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + xlab("k=2") + theme_bw() + 
+               theme(legend.position="bottom", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+             ncol=3);
+```
+
+#### How do the scale scores affect the distribution in the clusters?
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *liking* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=liking)) + 
+              geom_bar(aes(fill=k6), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=liking)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *vividness* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=vivid)) + 
+              geom_bar(aes(fill=k6), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=vivid)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *originality* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=origin)) + 
+              geom_bar(aes(fill=k6), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=origin)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *aesthetics* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=aesth)) + 
+              geom_bar(aes(fill=k6), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=aesth)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *curiosity* scores by cluster and various criteria."), message=FALSE}
+grid.arrange(ggplot(dclust$kmeans, aes(x=curios)) + 
+              geom_bar(aes(fill=k6), color="black", alpha=0.5, position=position_dodge()) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ .) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dclust$kmeans, aes(x=curios)) + 
+               geom_bar(aes(fill=jtyp), color="black", alpha=0.5, position=position_dodge()) + facet_grid(k6 ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+#### Correspondence k=5 ↔︎ k=6
+
+```{r fig.width=6, fig.height=5, fig.cap=capFig("Correspondence between k=5 (colums) and k=6 (row) clusters.")}
+# correspondence between k=5 and k=6 clusters
+pander(tb_5_6 <- table(dclust$kmeans$k5, dclust$kmeans$k6));
+mosaicplot(tb_5_6, color=TRUE, main="k=5 ↔︎ k=6", las=1);
+```
+
+### Summary
+
+Using k-means clustering with the number of clusters *k* between 2 and 6 seems to suggest that the main distinction is really between human and AI judgments, with gAI somewhere in between somewhat more simialr to human than to AI, and then mostly between the portions of the scales used.
+
+```{r echo=FALSE, results='hide'}
+rm(dclust); gc();
+```
+
+
+## Item properties
+
+Let's now look at the properties of the 5 measures using Mokken Scaling Analysis (MSA), PCA and FA.
+For more details, please see @dima_scale_2018 and the accompanying `R` code available at [https://github.com/alexadima/6-steps-protocol](https://github.com/alexadima/6-steps-protocol).
+We will do it for the whole data, as well as for the human and AI judgements separately, when the case.
+
+
+### Mokken Scaling Analysis (MSA)
+
+```{r, fig.width=4, fig.height=4, warning=FALSE, message=FALSE, echo=FALSE, fig.cap=capFig("MSA: histogram of the number of Guttman errors (gPlus) across all items.")}
+# Outliers:
+xPlus   <- rowSums(dall[,c("liking", "vivid", "origin", "aesth", "curios")]);
+if( !file.exists("./cache/gErrors.rds") ) # computationally expensive
+{
+  gErrors <- mokken::check.errors(dall[,c("liking", "vivid", "origin", "aesth", "curios")], returnGplus=TRUE, returnOplus=TRUE); # needs 128Gb+ RAM!
+  saveRDS(gErrors, file=xzfile("./cache/gErrors.rds", compression=9));
+} else
+{
+  gErrors <- readRDS(xzfile("./cache/gErrors.rds"));
+}
+gPlus   <- gErrors$Gplus;
+oPlus   <- gErrors$Oplus;
+hist(gPlus, main="Histogram of gPlus", xlab="gPlus (# of Guttman errors)");
+# cor(cbind(oPlus, gPlus, xPlus))
+
+# identify the outliers:
+Q3 <- summary(gPlus)[[5]];
+IQR <- Q3 - summary(gPlus)[[2]];
+outlier <- gPlus > Q3 + 1.5 * IQR;
+# if needed to further analyse outliers
+# cbind(mydata, gPlus)[outlier,]
+# then possible sensitivity analysis:
+# coefH(d_tone_wide[!outlier, -1])
+```
+
+There were `r sum(outlier)` cases (out of `r length(gPlus)`, i.e. `r round(100*sum(outlier)/length(gPlus), 1)`%) with a number of Guttman errors bigger than (Q3 + 1.5*IQR) = `r Q3 + 1.5*IQR`. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE, results='hide'}
+# Compute scalability coefficients
+if( !file.exists("./cache/Hvalues.rds") ) # computationally expensive
+{
+  Hvalues_full <- mokken::coefH(dall[,c("liking", "vivid", "origin", "aesth", "curios")], se=TRUE, ci=0.95);
+  Hvalues <- list("Hi"=Hvalues_full$Hi, "H"=Hvalues_full$H); # keep only the info we actually need, as the full object is way too big
+  saveRDS(Hvalues, file=xzfile("./cache/Hvalues.rds", compression=9));
+} else
+{
+  Hvalues <- readRDS(xzfile("./cache/Hvalues.rds"));
+}
+
+# examine aisp for increasing c levels (run the function you defined above and give it a name)
+if( !file.exists("./cache/motable.rds") ) # computationally expensive
+{
+  motable <- moscales.for.lowerbounds(dall[,c("liking", "vivid", "origin", "aesth", "curios")]);
+  motable <- cbind("Items"=rownames(motable), motable);
+  saveRDS(motable, file=xzfile("./cache/motable.rds", compression=9));
+} else
+{
+  motable <- readRDS(xzfile("./cache/motable.rds"));
+}
+
+# if you need to view it
+# View(aispmydata)
+```
+
+```{r results = 'asis', echo=FALSE}
+d <- as.data.frame(cbind("Items"=rownames(Hvalues$Hi), Hvalues$Hi)); names(d) <- c("item", "H", "se", "95CI");
+d$H <- as.numeric(trimws(d$H));
+knitr::kable(d, row.names=FALSE, align="r", col.names=c("Items", "Item H", "se", "95% ci"),
+             caption=capTab("MSA: Homogeneity values (with standard errors and 95%CIs) for all items, sorted by item name."))
+```
+
+The complete item set has a homogeneity value *H* (se, 95%CI) of `r Hvalues$H`: this is significantly higher than the recommended 0.30, suggesting that the scale *is homogeneous*.
+This is further supported by the fact that all items have a homogeneity above this value.
+
+```{r results = 'asis', echo=FALSE}
+knitr::kable(motable, row.names=FALSE, align="r",
+             caption=capTab("MSA: *aisp* for increasing H thresholds (c) for all items."));
+```
+
+These results suggest that these items most probably form a single scale.
+
+
+### PCA and FA
+
+#### Overall
+
+```{r include=FALSE}
+# PCA and EFA across trials:
+d <- dall[,c("liking", "vivid", "origin", "aesth", "curios")];
+
+# PCA:
+t_pca <- prcomp(d, scale.=TRUE, center=TRUE);
+t_pca;
+summary(t_pca);
+
+# EFA:
+# Tests of factorability (see https://towardsdatascience.com/exploratory-factor-analysis-in-r-e31b0015f224):
+psych::KMO(r=cor(d)); # Kaiser-Meyer-Olkin (KMO) sampling adequacy = 0.88 >> 0.60 -> ok
+psych::cortest.bartlett(d); # p=0 -> ok
+det(cor(d)); # seems fine
+
+# Number of factors:
+psych::fa.parallel(d, fa="fa", n.iter=100, error.bars=TRUE); # -> suggests 3 factors, but this is way too many for just 5 variables
+psych::nfactors(d); # -> 1 or 2 factors
+
+t_fa_1f <- factanal(d, 1, rotation="promax"); t_fa_1f; psych::fa.diagram(t_fa_1f$loadings); # p-value is 0 
+t_fa_2f <- factanal(d, 2, rotation="promax"); t_fa_2f; psych::fa.diagram(t_fa_2f$loadings); # p-value is 5.07e-23
+```
+
+For **PCA**, PC~1~ explains `r round(100*(s <- summary(t_pca)$importance)["Proportion of Variance", "PC1"],1)`% of the variance, followed by PC~2~ which explains `r round(100*(s <- summary(t_pca)$importance)["Proportion of Variance", "PC2"],1)`%, suggesting there is a main factor on which all items load, but PC2 also seems to say something about the structure of the questions:
+
+```{r fig.width=5, fig.height=4, fig.cap=capFig("Screeplot of the PCA of all the tone items together."), warning=FALSE}
+fviz_eig(t_pca);
+```
+```{r fig.width=11, fig.height=10, fig.cap=capFig("Loading of the tone items on the first 2 PCs."), warning=FALSE}
+fviz_pca_var(t_pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             );
+```
+
+The actual loadings on the first two PCs are:
+```{r}
+kable(round(t_pca$rotation[,1:2],2));
+```
+
+
+For **EFA**, all the preliminary tests suggest that factor analysis is appropriate (`r sprintf("Kaiser-Meyer-Olkin = %.2f > 0.60; Bartlett's test is significant: *χ*^2^(%d)=%.1f, *p*=%.3g; and det(cor(data))=%.2g > 0", psych::KMO(r=cor(d))$MSA, (tmp <- psych::cortest.bartlett(d))$df, tmp$chisq, tmp$p.value, det(cor(d)))`).
+The suggested number of factors seems to be 1 or 2 factors:
+
+```{r fig.width=4, fig.height=4, fig.cap=capFig("Screeplot of the observed, simulated and randomized data with 1 standard deviation error bars (as generated by `fa.parallel())`."), results='hide'}
+fa.parallel(d, fa="fa", n.iter=100, error.bars=TRUE);
+```
+```{r fig.width=4*2, fig.height=4*2, fig.cap=capFig("Number of factors as suggested by the VSS criterion (top left), the complexity of the solution (top right), BIC (bottom left) and Root Mean Residual (bottom right), as implemented by `nfactors()`."), results='hide'}
+nfactors(d);
+```
+
+The two FA models are (but the fit to the data is pretty bad): 
+```{r fig.width=6, fig.height=4, fig.cap=capFig("Loadings of the variables in the 2-factors model."), results='hide'}
+fa.diagram(t_fa_1f$loadings);
+```
+```{r fig.width=6, fig.height=4, fig.cap=capFig("Loadings of the variables in the 2-factors model."), results='hide'}
+fa.diagram(t_fa_2f$loadings);
+```
+and the actual loadings on the two factors are (showing only those ≥ 0.1 in absolute value):
+```{r}
+t_fa_1f$loadings;
+t_fa_2f$loadings;
+```
+
+Let's look at this separately for each type of judge...
+
+
+#### Human judges only
+
+```{r include=FALSE}
+# PCA and EFA across trials:
+d.hum <- dall[dall$jtyp=="human",c("liking", "vivid", "origin", "aesth", "curios")];
+
+# PCA:
+t_pca.hum <- prcomp(d.hum, scale.=TRUE, center=TRUE);
+t_pca.hum;
+summary(t_pca.hum);
+
+# EFA:
+# Tests of factorability (see https://towardsdatascience.com/exploratory-factor-analysis-in-r-e31b0015f224):
+psych::KMO(r=cor(d.hum)); # Kaiser-Meyer-Olkin (KMO) sampling adequacy = 0.91 >> 0.60 -> ok
+psych::cortest.bartlett(d.hum); # p=0 -> ok
+det(cor(d.hum)); # seems fine
+
+# Number of factors:
+psych::fa.parallel(d.hum, fa="fa", n.iter=100, error.bars=TRUE); # -> suggests 3 factors, but this is way too many for just 5 variables
+psych::nfactors(d.hum); # -> 1 or 2 factors
+
+t_fa_1f.hum <- factanal(d.hum, 1, rotation="promax"); t_fa_1f.hum; psych::fa.diagram(t_fa_1f.hum$loadings); # p-value is 0 
+t_fa_2f.hum <- factanal(d.hum, 2, rotation="promax"); t_fa_2f.hum; psych::fa.diagram(t_fa_2f.hum$loadings); # p-value is 6.3e-74
+```
+
+For **PCA**, PC~1~ explains `r round(100*(s <- summary(t_pca.hum)$importance)["Proportion of Variance", "PC1"],1)`% of the variance, followed by PC~2~ which explains `r round(100*(s <- summary(t_pca.hum)$importance)["Proportion of Variance", "PC2"],1)`%, suggesting there is a main factor on which all items load, but PC2 also seems to say something about the structure of the questions:
+
+```{r fig.width=5, fig.height=4, fig.cap=capFig("Screeplot of the PCA of all the tone items together."), warning=FALSE}
+fviz_eig(t_pca.hum);
+```
+```{r fig.width=11, fig.height=10, fig.cap=capFig("Loading of the tone items on the first 2 PCs."), warning=FALSE}
+fviz_pca_var(t_pca.hum,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             );
+```
+
+The actual loadings on the first two PCs are:
+```{r}
+kable(round(t_pca.hum$rotation[,1:2],2));
+```
+
+
+For **EFA**, all the preliminary tests suggest that factor analysis is appropriate (`r sprintf("Kaiser-Meyer-Olkin = %.2f > 0.60; Bartlett's test is significant: *χ*^2^(%d)=%.1f, *p*=%.3g; and det(cor(data))=%.2g > 0", psych::KMO(r=cor(d.hum))$MSA, (tmp <- psych::cortest.bartlett(d.hum))$df, tmp$chisq, tmp$p.value, det(cor(d.hum)))`).
+The suggested number of factors seems to be 1 or 2 factors:
+
+```{r fig.width=4, fig.height=4, fig.cap=capFig("Screeplot of the observed, simulated and randomized data with 1 standard deviation error bars (as generated by `fa.parallel())`."), results='hide'}
+fa.parallel(d.hum, fa="fa", n.iter=100, error.bars=TRUE);
+```
+```{r fig.width=4*2, fig.height=4*2, fig.cap=capFig("Number of factors as suggested by the VSS criterion (top left), the complexity of the solution (top right), BIC (bottom left) and Root Mean Residual (bottom right), as implemented by `nfactors()`."), results='hide'}
+nfactors(d.hum);
+```
+
+The two FA models are (but the fit to the data is pretty bad): 
+```{r fig.width=6, fig.height=4, fig.cap=capFig("Loadings of the variables in the 2-factors model."), results='hide'}
+fa.diagram(t_fa_1f.hum$loadings);
+```
+```{r fig.width=6, fig.height=4, fig.cap=capFig("Loadings of the variables in the 2-factors model."), results='hide'}
+fa.diagram(t_fa_2f.hum$loadings);
+```
+and the actual loadings on the two factors are (showing only those ≥ 0.1 in absolute value):
+```{r}
+t_fa_1f.hum$loadings;
+t_fa_2f.hum$loadings;
+```
+
+
+#### AI judges only
+
+```{r include=FALSE}
+# PCA and EFA across trials:
+d.ai <- dall[dall$jtyp=="AI",c("liking", "vivid", "origin", "aesth", "curios")];
+
+# PCA:
+t_pca.ai <- prcomp(d.ai, scale.=TRUE, center=TRUE);
+t_pca.ai;
+summary(t_pca.ai);
+
+# EFA:
+# Tests of factorability (see https://towardsdatascience.com/exploratory-factor-analysis-in-r-e31b0015f224):
+psych::KMO(r=cor(d.ai)); # Kaiser-Meyer-Olkin (KMO) sampling adequacy = 0.82 >> 0.60 -> ok
+psych::cortest.bartlett(d.ai); # p=0 -> ok
+det(cor(d.ai)); # seems fine
+
+# Number of factors:
+psych::fa.parallel(d.ai, fa="fa", n.iter=100, error.bars=TRUE); # -> suggests 2 factors
+psych::nfactors(d.ai); # -> 1 or 2 factors
+
+t_fa_1f.ai <- factanal(d.ai, 1, rotation="promax"); t_fa_1f.ai; psych::fa.diagram(t_fa_1f.ai$loadings); # p-value is 0 
+t_fa_2f.ai <- factanal(d.ai, 2, rotation="promax"); t_fa_2f.ai; psych::fa.diagram(t_fa_2f.ai$loadings); # p-value is 4.93e-29
+```
+
+For **PCA**, PC~1~ explains `r round(100*(s <- summary(t_pca.ai)$importance)["Proportion of Variance", "PC1"],1)`% of the variance, followed by PC~2~ which explains `r round(100*(s <- summary(t_pca.ai)$importance)["Proportion of Variance", "PC2"],1)`%, suggesting there is a main factor on which all items load, but PC2 also seems to say something about the structure of the questions:
+
+```{r fig.width=5, fig.height=4, fig.cap=capFig("Screeplot of the PCA of all the tone items together."), warning=FALSE}
+fviz_eig(t_pca.ai);
+```
+```{r fig.width=11, fig.height=10, fig.cap=capFig("Loading of the tone items on the first 2 PCs."), warning=FALSE}
+fviz_pca_var(t_pca.ai,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             );
+```
+
+The actual loadings on the first two PCs are:
+```{r}
+kable(round(t_pca.ai$rotation[,1:2],2));
+```
+
+
+For **EFA**, all the preliminary tests suggest that factor analysis is appropriate (`r sprintf("Kaiser-Meyer-Olkin = %.2f > 0.60; Bartlett's test is significant: *χ*^2^(%d)=%.1f, *p*=%.3g; and det(cor(data))=%.2g > 0", psych::KMO(r=cor(d.ai))$MSA, (tmp <- psych::cortest.bartlett(d.ai))$df, tmp$chisq, tmp$p.value, det(cor(d.ai)))`).
+The suggested number of factors seems to be 1 or 2 factors:
+
+```{r fig.width=4, fig.height=4, fig.cap=capFig("Screeplot of the observed, simulated and randomized data with 1 standard deviation error bars (as generated by `fa.parallel())`."), results='hide'}
+fa.parallel(d.ai, fa="fa", n.iter=100, error.bars=TRUE);
+```
+```{r fig.width=4*2, fig.height=4*2, fig.cap=capFig("Number of factors as suggested by the VSS criterion (top left), the complexity of the solution (top right), BIC (bottom left) and Root Mean Residual (bottom right), as implemented by `nfactors()`."), results='hide'}
+nfactors(d.ai);
+```
+
+The two FA models are (but the fit to the data is pretty bad): 
+```{r fig.width=6, fig.height=4, fig.cap=capFig("Loadings of the variables in the 2-factors model."), results='hide'}
+fa.diagram(t_fa_1f.ai$loadings);
+```
+```{r fig.width=6, fig.height=4, fig.cap=capFig("Loadings of the variables in the 2-factors model."), results='hide'}
+fa.diagram(t_fa_2f.ai$loadings);
+```
+and the actual loadings on the two factors are (showing only those ≥ 0.1 in absolute value):
+```{r}
+t_fa_1f.ai$loadings;
+t_fa_2f.ai$loadings;
+```
+
+
+#### Guided AI judges only
+
+```{r include=FALSE}
+# PCA and EFA across trials:
+d.gai <- dall[dall$jtyp=="gAI",c("liking", "vivid", "origin", "aesth", "curios")];
+
+# PCA:
+t_pca.gai <- prcomp(d.gai, scale.=TRUE, center=TRUE);
+t_pca.gai;
+summary(t_pca.gai);
+
+# EFA:
+# Tests of factorability (see https://towardsdatascience.com/exploratory-factor-analysis-in-r-e31b0015f224):
+psych::KMO(r=cor(d.gai)); # Kaiser-Meyer-Olkin (KMO) sampling adequacy = 0.90 >> 0.60 -> ok
+psych::cortest.bartlett(d.gai); # p=0 -> ok
+det(cor(d.gai)); # seems fine
+
+# Number of factors:
+psych::fa.parallel(d.gai, fa="fa", n.iter=100, error.bars=TRUE); # -> suggests 2 factors
+psych::nfactors(d.gai); # -> 1 or 2 factors
+
+t_fa_1f.gai <- factanal(d.gai, 1, rotation="promax"); t_fa_1f.gai; psych::fa.diagram(t_fa_1f.gai$loadings); # p-value is 0 
+t_fa_2f.gai <- factanal(d.gai, 2, rotation="promax"); t_fa_2f.gai; psych::fa.diagram(t_fa_2f.gai$loadings); # p-value is 0.787
+```
+
+For **PCA**, PC~1~ explains `r round(100*(s <- summary(t_pca.gai)$importance)["Proportion of Variance", "PC1"],1)`% of the variance, followed by PC~2~ which explains `r round(100*(s <- summary(t_pca.gai)$importance)["Proportion of Variance", "PC2"],1)`%, suggesting there is a main factor on which all items load, but PC2 also seems to say something about the structure of the questions:
+
+```{r fig.width=5, fig.height=4, fig.cap=capFig("Screeplot of the PCA of all the tone items together."), warning=FALSE}
+fviz_eig(t_pca.gai);
+```
+```{r fig.width=11, fig.height=10, fig.cap=capFig("Loading of the tone items on the first 2 PCs."), warning=FALSE}
+fviz_pca_var(t_pca.gai,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             );
+```
+
+The actual loadings on the first two PCs are:
+```{r}
+kable(round(t_pca.gai$rotation[,1:2],2));
+```
+
+
+For **EFA**, all the preliminary tests suggest that factor analysis is appropriate (`r sprintf("Kaiser-Meyer-Olkin = %.2f > 0.60; Bartlett's test is significant: *χ*^2^(%d)=%.1f, *p*=%.3g; and det(cor(data))=%.2g > 0", psych::KMO(r=cor(d.gai))$MSA, (tmp <- psych::cortest.bartlett(d.gai))$df, tmp$chisq, tmp$p.value, det(cor(d.gai)))`).
+The suggested number of factors seems to be 1 or 2 factors:
+
+```{r fig.width=4, fig.height=4, fig.cap=capFig("Screeplot of the observed, simulated and randomized data with 1 standard deviation error bars (as generated by `fa.parallel())`."), results='hide'}
+fa.parallel(d.gai, fa="fa", n.iter=100, error.bars=TRUE);
+```
+```{r fig.width=4*2, fig.height=4*2, fig.cap=capFig("Number of factors as suggested by the VSS criterion (top left), the complexity of the solution (top right), BIC (bottom left) and Root Mean Residual (bottom right), as implemented by `nfactors()`."), results='hide'}
+nfactors(d.gai);
+```
+
+The two FA models are (but the fit to the data is pretty bad): 
+```{r fig.width=6, fig.height=4, fig.cap=capFig("Loadings of the variables in the 2-factors model."), results='hide'}
+fa.diagram(t_fa_1f.gai$loadings);
+```
+```{r fig.width=6, fig.height=4, fig.cap=capFig("Loadings of the variables in the 2-factors model."), results='hide'}
+fa.diagram(t_fa_2f.gai$loadings);
+```
+and the actual loadings on the two factors are (showing only those ≥ 0.1 in absolute value):
+```{r}
+t_fa_1f.gai$loadings;
+t_fa_2f.gai$loadings;
+```
+
+
+#### Let's compare human, AI and guided AI judges
+
+```{r results='hide'}
+# See https://lavaan.ugent.be/tutorial/groups.html
+if( !file.exists("./cache/1FA.rds") )
+{
+  crea.1f <- "
+    crea =~ liking + vivid + origin + aesth + curios;
+  ";
+  
+  # configurational invariance:
+  crea.1f.fit <- cfa(crea.1f, data=dall, group="jtyp", se="bootstrap", test="bootstrap");
+  summary(crea.1f.fit);
+  fitMeasures(crea.1f.fit, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+  lavaanPlot(model=crea.1f.fit, coefs=TRUE, sig=1.00, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+  # weak invariance:
+  crea.1f.fit.wi <- cfa(crea.1f, data=dall, group="jtyp", group.equal="loadings", se="bootstrap", test="bootstrap");
+  # strong invariance:
+  crea.1f.fit.si <- cfa(crea.1f, data=dall, group="jtyp", group.equal=c("intercepts", "loadings"), se="bootstrap", test="bootstrap");
+  # model comparison tests
+  lavTestLRT(crea.1f.fit, crea.1f.fit.wi, crea.1f.fit.si); # both p-values are signif. ->  factor loadings and latent means are different between judge types! 
+  
+  # pairwise comparisons between types of judges:
+  # H vs AI:
+  d <- dall[dall$jtyp %in% c("human","AI"),] %>% mutate(jtyp=as.character(jtyp));
+  crea.1f.ha.fit <- cfa(crea.1f, data=d, group="jtyp", se="bootstrap", test="bootstrap");
+  summary(crea.1f.ha.fit);
+  fitMeasures(crea.1f.ha.fit, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+  lavaanPlot(model=crea.1f.ha.fit, coefs=TRUE, sig=1.00, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+  crea.1f.ha.fit.wi <- cfa(crea.1f, data=d, group="jtyp", group.equal="loadings", se="bootstrap", test="bootstrap");
+  crea.1f.ha.fit.si <- cfa(crea.1f, data=d, group="jtyp", group.equal=c("intercepts", "loadings"), se="bootstrap", test="bootstrap");
+  lavTestLRT(crea.1f.ha.fit, crea.1f.ha.fit.wi, crea.1f.ha.fit.si); # both p-values are signif. ->  factor loadings and latent means are different between judge types! 
+  
+  # H vs gAI:
+  d <- dall[dall$jtyp %in% c("human","gAI"),] %>% mutate(jtyp=as.character(jtyp));
+  crea.1f.hg.fit <- cfa(crea.1f, data=d, group="jtyp", se="bootstrap", test="bootstrap");
+  summary(crea.1f.hg.fit);
+  fitMeasures(crea.1f.hg.fit, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+  lavaanPlot(model=crea.1f.hg.fit, coefs=TRUE, sig=1.00, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+  crea.1f.hg.fit.wi <- cfa(crea.1f, data=d, group="jtyp", group.equal="loadings", se="bootstrap", test="bootstrap");
+  crea.1f.hg.fit.si <- cfa(crea.1f, data=d, group="jtyp", group.equal=c("intercepts", "loadings"), se="bootstrap", test="bootstrap");
+  lavTestLRT(crea.1f.hg.fit, crea.1f.hg.fit.wi, crea.1f.hg.fit.si); # both p-values are signif. ->  factor loadings and latent means are different between judge types! 
+  
+  # AI vs gAI:
+  d <- dall[dall$jtyp %in% c("AI","gAI"),] %>% mutate(jtyp=as.character(jtyp));
+  crea.1f.ag.fit <- cfa(crea.1f, data=d, group="jtyp", se="bootstrap", test="bootstrap");
+  summary(crea.1f.ag.fit);
+  fitMeasures(crea.1f.ag.fit, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+  lavaanPlot(model=crea.1f.ag.fit, coefs=TRUE, sig=1.00, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+  crea.1f.ag.fit.wi <- cfa(crea.1f, data=d, group="jtyp", group.equal="loadings", se="bootstrap", test="bootstrap");
+  crea.1f.ag.fit.si <- cfa(crea.1f, data=d, group="jtyp", group.equal=c("intercepts", "loadings"), se="bootstrap", test="bootstrap");
+  lavTestLRT(crea.1f.ag.fit, crea.1f.ag.fit.wi, crea.1f.ag.fit.si); # both p-values are signif. ->  factor loadings and latent means are different between judge types! 
+  
+  # separately for types of judges:
+  crea.1f.fit.hum <- cfa(crea.1f, data=dall[dall$jtyp=="human",], se="bootstrap", test="bootstrap");
+  summary(crea.1f.fit.hum);
+  fitMeasures(crea.1f.fit.hum, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+  lavaanPlot(model=crea.1f.fit.hum, coefs=TRUE, sig=1.00, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+  
+  crea.1f.fit.ai <- cfa(crea.1f, data=dall[dall$jtyp=="AI",], se="bootstrap", test="bootstrap");
+  summary(crea.1f.fit.ai);
+  fitMeasures(crea.1f.fit.ai, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+  lavaanPlot(model=crea.1f.fit.ai, coefs=TRUE, sig=1.00, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+  
+  crea.1f.fit.gai <- cfa(crea.1f, data=dall[dall$jtyp=="gAI",], se="bootstrap", test="bootstrap");
+  summary(crea.1f.fit.gai);
+  fitMeasures(crea.1f.fit.gai, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+  lavaanPlot(model=crea.1f.fit.gai, coefs=TRUE, sig=1.00, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+
+  # collect and save these results:
+  crea1FA <- list("model"=crea.1f, 
+                  "fit"=crea.1f.fit, "invariance.tests"=lavTestLRT(crea.1f.fit, crea.1f.fit.wi, crea.1f.fit.si), 
+                  "fit.h.ai"  =crea.1f.ha.fit, "invariance.tests.h.ai"=lavTestLRT(crea.1f.ha.fit, crea.1f.ha.fit.wi, crea.1f.ha.fit.si), 
+                  "fit.h.gai" =crea.1f.hg.fit, "invariance.tests.h.gai"=lavTestLRT(crea.1f.hg.fit, crea.1f.hg.fit.wi, crea.1f.hg.fit.si), 
+                  "fit.ai.gai"=crea.1f.ag.fit, "invariance.tests.ai.gai"=lavTestLRT(crea.1f.ag.fit, crea.1f.ag.fit.wi, crea.1f.ag.fit.si), 
+                  "fit.hum"=crea.1f.fit.hum, "fit.ai"=crea.1f.fit.ai, "fit.gai"=crea.1f.fit.gai);
+  saveRDS(crea1FA, file="./cache/1FA.rds", compress="xz");
+} else
+{
+  crea1FA <- readRDS("./cache/1FA.rds");
+}
+```
+
+We fitted a 1FA model to the whole data in a multi-group analysis with *jtyp* defining the three groups: humans vs AI judges vs guided AI judges.
+
+The model is:
+```{r fig.width=7, fig.height=2, fig.cap=capFig("1FA model fitted to the whole dataset but splitted by *jtyp*. There are three arrows and loadings for each indicator, the first being for the AI rater, the second for the human raters, and the third for the guided AI rater. The loadings are standardized and the stars represent their significance level.")}
+lavaanPlot(model=crea1FA$fit, coefs=TRUE, sig=0.05, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+```
+and its summary (using bootstrap for *p*-values and tests):
+```{r}
+summary(crea1FA$fit, stand=TRUE);
+```
+It clearly does not fit the data very well (the χ^2^ test is highly significant) and the other indices of fit are not great either:
+```{r}
+fitMeasures(crea1FA$fit, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+```
+
+Let's check if the same model holds for the three types of judges or not, but checking its configurational, weak and strong invariance, respectively (see [`lavaan`'s multiple groups help](https://lavaan.ugent.be/tutorial/groups.html) for details):
+```{r}
+crea1FA$invariance.tests;
+```
+both tests are highly significant, meaning that both the factor loadings and the latent means are different between the types of judges. 
+
+
+Focusing on each pairwise comparison between types of judges, we have:
+
+Human vs AI:
+```{r fig.width=7, fig.height=2, fig.cap=capFig("1FA model fitted to the whole dataset splitted AI (left) vs human (right).")}
+lavaanPlot(model=crea1FA$fit.h.ai, coefs=TRUE, sig=0.05, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+crea1FA$invariance.tests.h.ai;
+```
+
+Human vs gAI:
+```{r fig.width=7, fig.height=2, fig.cap=capFig("1FA model fitted to the whole dataset splitted human (left) vs gAI (right).")}
+lavaanPlot(model=crea1FA$fit.h.gai, coefs=TRUE, sig=0.05, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+crea1FA$invariance.tests.h.gai;
+```
+
+AI vs gAI:
+```{r fig.width=7, fig.height=2, fig.cap=capFig("1FA model fitted to the whole dataset splitted AI (left) vs gAI (right).")}
+lavaanPlot(model=crea1FA$fit.ai.gai, coefs=TRUE, sig=0.05, stand=TRUE, covs=TRUE, stars=c("regress", "latent", "covs"), edge_options=list(color="gray"));
+crea1FA$invariance.tests.ai.gai;
+```
+
+When fitted separately for each type of judge, the models still don't fit the data very well, but the fit indices do change:
+
+- for humans judges:
+```{r}
+fitMeasures(crea1FA$fit.hum, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+```
+
+- for AI judge:
+```{r}
+fitMeasures(crea1FA$fit.ai, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+```
+
+- for guided AI judge:
+```{r}
+fitMeasures(crea1FA$fit.gai, c("chisq", "df", "pvalue", "cfi", "tli", "nnfi", "rfi"));
+```
+
+suggesting that the 1FA model fits the human and guided AI judgements much better than the AI ones.
+
+
+#### Adding the 1FA estimates to the database
+
+Nevertheless, in order to compare the two types of judges, we will use the 1FA model for both of them, but taking into account their differences, so we will add the estimated scores on this "creativity" scale (*crea*) back in the database:
+
+```{r results='hide'}
+crea1FA.pred <- lavPredict(crea1FA$fit, type="lv", method="regression", transform=TRUE, append.data=TRUE, assemble=TRUE);
+# check that the order is correct:
+all(vapply(1:nrow(dall), function(i) dall$jtyp[i] == crea1FA.pred$jtyp[i] && dall$liking[i] == crea1FA.pred$liking[i] && 
+             dall$vivid[i] == crea1FA.pred$vivid[i] && dall$origin[i] == crea1FA.pred$origin[i] && dall$aesth[i] == crea1FA.pred$aesth[i] && 
+             dall$curios[i] == crea1FA.pred$curios[i], logical(1)));
+dall$crea <- crea1FA.pred$crea;
+dall$crea <- 1 + (7-1)*(dall$crea - min(dall$crea, na.rm=TRUE))/(max(dall$crea, na.rm=TRUE) - min(dall$crea, na.rm=TRUE)); # convert it to a 1 to 7 scale to make it directly comparable with the original scales
+```
+
+```{r fig.width=2*5, fig.height=2*5, fig.cap=capFig("Distribution of *creativity* scores (1FA model by judge type) by judge type and subcategory of drawing."), message=FALSE}
+grid.arrange(ggplot(dall, aes(x=crea)) + 
+               geom_histogram(color="black", alpha=0.5) +
+               scale_fill_discrete(name="Cluster") + theme_bw() + ggtitle("All judges and categories") + theme(legend.position="bottom"),
+             ggplot(dall, aes(x=crea)) + 
+               geom_histogram(aes(fill=jtyp), color="black", alpha=0.5) + facet_grid(. ~ jtyp) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("By judge across categories") + theme(legend.position="bottom"),
+             ggplot(dall, aes(x=crea)) + 
+               geom_histogram(aes(fill=jtyp), color="black", alpha=0.5) + facet_grid(jtyp ~ cat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and category") + theme(legend.position="bottom"),
+             ggplot(dall, aes(x=crea)) + 
+               geom_histogram(aes(fill=jtyp), color="black", alpha=0.5) + facet_grid(jtyp ~ subcat) +
+               scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom"),
+             ncol=2);
+```
+
+```{r fig.width=2*5, fig.height=1*5, fig.cap=capFig("Distribution of *creativity* scores (1FA model by judge type) by judge type and subcategory of drawing."), message=FALSE}
+ggplot(dall, aes(y=crea, x=subcat)) + 
+  geom_jitter(aes(x=subcat), alpha=0.1, color="gray80") +
+  geom_boxplot(aes(fill=subcat), color="black", alpha=0.25) + facet_grid(. ~ jtyp) +
+  geom_violin(aes(fill=subcat), color="blue", alpha=0.10) + facet_grid(. ~ jtyp) +
+  scale_fill_viridis_d(name="subcat") + theme_bw() + ggtitle("By judge and subcategory") + theme(legend.position="bottom");
+```
+
+
+## Interim conclusions
+
+The cluster analysis, the correlation matrix, the PCA and (E/C)FA seem to suggest that:
+
+1. human and AI judgments are qualitatively different, with the guided AI ones somewhat "in between", but
+2. that a 1 factor model, "creativity", captures the main aspects of the 5-questions scores, especially for the human and guided AI judges, but
+3. this 1FA model has different scores for the three types of judge.
+
+Therefore, we will proceed with a unified analysis where we use the predicted score on this latent "creativity" (*crea*) -- estimated differently for the human, guided AI, and AI judges -- as the DV of interest.
+
+
+# Inter-rater agreement
+
+As our design does not have the human judges judging all items, but only a subset of the items in such a way that all items are judged by multiple (but different) judges, the usual inter-rater agreement measures cannot be easily applied.
+However, we can capture how similar various items are considered to be by looking at their variance (standard deviation) of their rating across the judges that did judge them.
+
+```{r }
+# compute the standard deviation of the ratings (poor man's proxy for inter-rate agreement):
+dall.long <- dall[,c("iid", "cat", "subcat", "jtyp", "liking", "vivid", "origin", "aesth", "curios", "crea")] %>% melt(measure.vars=c("liking", "vivid", "origin", "aesth", "curios", "crea"), variable.name="measure", value.name="value");
+dvariance <- dall.long %>% group_by(iid, measure, jtyp) %>% mutate("mean"=mean(value), "sd"=sd(value)) %>% dplyr::select(iid, measure, mean, sd, cat, subcat, jtyp) %>% unique();
+```
+```{r fig.width=2*6, fig.height=1*5, fig.cap=capFig("Stdandard deviation (sd) of scores for each scale, including the latent creativity (*crea*), by judge type across categories."), message=FALSE}
+ggplot(dvariance, aes(x=sd, fill=jtyp)) + 
+  geom_density(alpha=0.25) + 
+  facet_grid(. ~ measure) +
+  scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("StdDev of scores by judge type across categories") + theme(legend.position="bottom");
+```
+```{r fig.width=2*6, fig.height=1*5, fig.cap=capFig("Stdandard deviation (sd) of scores for each scale, including the latent creativity (*crea*), by judge type and scategory."), message=FALSE}
+ggplot(dvariance, aes(x=sd, fill=jtyp)) + 
+  geom_density(alpha=0.25) + 
+  facet_grid(subcat ~ measure) +
+  scale_fill_manual(values=c("human"="steelblue", "AI"="orange", "gAI"="red"), name="Judge") + theme_bw()  + ggtitle("StdDev of scores bt judge and subcategory") + theme(legend.position="bottom");
+```
+
+It seems that:
+
+- the patterns are *very similar across measures*, including the latent creativity score,
+- overall, the *consistency is quite good* across all items, measures and judge types (mean sd across measures `r round(mean(dvariance$sd[ dvariance$measure != "crea" ], na.rm=TRUE),2)`),
+- AI is very consistent in its judgments (`r round(mean(dvariance$sd[ dvariance$measure != "crea" & dvariance$jtyp == "AI" ], na.rm=TRUE),2)`),
+- humans show the most spread (`r round(mean(dvariance$sd[ dvariance$measure != "crea" & dvariance$jtyp == "human" ], na.rm=TRUE),2)`),
+- guidedAI is in between (`r round(mean(dvariance$sd[ dvariance$measure != "crea" & dvariance$jtyp == "gAI" ], na.rm=TRUE),2)`).
+
+
+# What influences "creativity"?
+
+Given that this creativity score is inherently bounded (as are its indicators), we will normalize it **between 0 (minimum) and 1 (maximum)** and use *beta regression* whenever possible.
+One extra complication concerns the values of exactly 0.0 and exactly 1.0, as standard beta regression cannot deal with them: there are two possible solutions: replace them by values that are very close to 0.0 and 1.0, respectively (say, 10^-7^ and 1-10^-7^) or use zero-and-one-inflated beta models: we opt here for the first as it requires less parameters and is simpler to interpret.
+
+```{r}
+pre4beta <- function(x, epsilon=1e-7)
+{
+  x.range <- range(x, na.rm=TRUE); x.min <- x.range[1]; x.max <- x.range[2]; x.range <- (x.max - x.min);
+  if( x.max == x.min ) return (x);
+  return (ifelse(x - x.min < epsilon, epsilon, ifelse(x.max - x < epsilon, 1-epsilon, (x - x.min)/x.range)));
+}
+dall$creab <- pre4beta(dall$crea);
+```
+
+
+## Intercept-only model
+
+```{r}
+if( !file.exists("./cache/glmm_c0.rds") )
+{
+  c.0 <- glmmTMB(creab ~ 1 + (1 | iid) + (1 | jid), data=dall, family=beta_family);
+  saveRDS(c.0, file="./cache/glmm_c0.rds", compress="xz");
+} else
+{
+  c.0 <- readRDS("./cache/glmm_c0.rds");
+}
+summary(c.0);
+icc(c.0); # 91.5%
+round(plogis(fixef(c.0)$cond["(Intercept)"]),2); # the expected creativity score, significantly lower than 0.50
+```
+
+
+## Judge type
+
+```{r}
+if( !file.exists("./cache/glmm_c1.rds") )
+{
+  c.1 <- update(c.0, . ~ . + jtyp);
+  saveRDS(c.1, file="./cache/glmm_c1.rds", compress="xz");
+} else
+{
+  c.1 <- readRDS("./cache/glmm_c1.rds");
+}
+summary(c.1);
+anova(c.1, c.0); # judge type does not make a difference (good, as the latents are estimated taking the judge type into account)
+```
+
+The judge type by itself does not seem to make a difference (which makes perfect sense, given that we estimate the latent *crea* using judge-type-specific loadings)...
+
+
+## Category
+
+```{r }
+if( !file.exists("./cache/glmm_c2.rds") )
+{
+  c.2 <- update(c.1, . ~ . + jtyp * cat);
+  #summary(c.2);
+  #anova(c.2, c.1); # c.2 is significantly better
+  c.2a <- update(c.2, . ~ . - jtyp:cat);
+  #anova(c.2a, c.2); # c.2a is worse -> interaction matters
+  saveRDS(c.2, file="./cache/glmm_c2.rds", compress="xz");
+} else
+{
+  c.2 <- readRDS("./cache/glmm_c2.rds");
+}
+summary(c.2);
+anova(c.2, c.1); # c.2 is significantly better
+```
+```{r fig.width=5, fig.height=4, fig.cap=capFig("Predicted creativity score from a beta regression on the interaction between judge type and category of drawing while controlling (as random effects) for item and individual judge.")}
+plot_model(c.2, type="pred", terms=c("jtyp", "cat")) + ylab("creativity") + ylim(0,1) + ggtitle("Predicted creativity");
+```
+
+... but it interacts significantly with the category, in that the human judges are clearly discriminating between the human- and AI-generated drawings, guided AI shows  atendency towards doing it, but the AI judges do not seem to care...
+
+
+## Subcategory
+
+```{r }
+if( !file.exists("./cache/glmm_c3.rds") )
+{
+  c.3 <- update(c.1, . ~ . + jtyp * subcat);
+  #summary(c.3);
+  #anova(c.3, c.1); # c.3 is better
+  c.3a <- update(c.3, . ~ . - jtyp:subcat);
+  #anova(c.3a, c.3); # c.3a is worse -> interaction matters
+  saveRDS(c.3, file="./cache/glmm_c3.rds", compress="xz");
+} else
+{
+  c.3 <- readRDS("./cache/glmm_c3.rds");
+}
+summary(c.3);
+anova(c.3, c.1); # c.3 is better
+```
+```{r fig.width=5, fig.height=4, fig.cap=capFig("Predicted creativity score from a beta regression on the interaction between judge type and subcategory of drawing while controlling (as random effects) for item and individual judge.")}
+plot_model(c.3, type="pred", terms=c("jtyp", "subcat")) + ylab("creativity") + ylim(0,1) + ggtitle("Predicted creativity");
+```
+
+... and it interacts significantly with the subcategory, in that the human judges are clearly discriminating between them, with HVA >> HNA ≳ HAI >> SAI, guided AI do not show statistically significant differences but do seem to follow the human pattern, while the AI judges do not seem to care...
+
+
+## Does the stimulus matter?
+
+```{r }
+if( !file.exists("./cache/glmm_c4.rds") )
+{
+  c.4 <- update(c.3, . ~ . + jtyp * stim + subcat * stim);
+  #summary(c.4);
+  #anova(c.4, c.3); # c.4 is better
+  # let's see what really matters:
+  c.4a <- update(c.4, . ~ . - subcat:stim); anova(c.4a, c.4); # c.4a is worse -> this interaction matters
+  c.4b <- update(c.4a, . ~ . - jtyp:stim); anova(c.4b, c.4a); # c.4b is worse -> this interaction matters
+  saveRDS(c.4, file="./cache/glmm_c4.rds", compress="xz");
+} else
+{
+  c.4 <- readRDS("./cache/glmm_c4.rds");
+}
+summary(c.4);
+anova(c.4, c.3); # c.4 is better
+```
+```{r fig.width=10, fig.height=6, fig.cap=capFig("Predicted creativity score from a beta regression on the interaction between judge type, subcategory of drawing, and sitmulus used to prompt the drawing, while controlling (as random effects) for item and individual judge.")}
+plot_model(c.4, type="pred", terms=c("jtyp", "subcat", "stim")) + ylab("creativity") + ylim(0,1) + ggtitle("Predicted creativity");
+```
+
+... it does, but the effect is quite small (even if statistically significant) + there are convergence issues...
+
+
+## Human judge characteristics
+
+Just for the human judges, do their characteristics matter?
+
+```{r }
+if( !file.exists("./cache/glmm_h5.rds") )
+{
+  # computationally expensive, so better to cache the final model:
+  h.0 <- glmmTMB(creab ~ 1 + (1 | iid) + (1 | jid), data=droplevels(dall[ dall$jtyp=="human" & !is.na(dall$jage) & !is.na(dall$jgen) & !is.na(dall$jeduc) & !is.na(dall$jasc), ]), family=beta_family);
+  summary(h.0);
+  icc(h.0); # 84.8%
+  round(plogis(fixef(h.0)$cond["(Intercept)"]),2); # the expected creativity score, significantly lower than 0.50
+  
+  h.1 <- update(h.0, . ~ . + subcat * stim);
+  summary(h.1);
+  anova(h.1, h.0); # h.1 is better
+  
+  h.2 <- update(h.1, . ~ . + jage + jgen + jeduc + jasc + jage:subcat + jgen:subcat + jeduc:subcat + jasc:subcat);
+  summary(h.2);
+  anova(h.2, h.1); # h.2 is better, but only jasc seems to matter...
+  
+  h.3 <- update(h.2, . ~ . - jage:subcat - jgen:subcat - jeduc:subcat - jasc:subcat);
+  summary(h.3);
+  anova(h.3, h.2); # h3 is worse -> some of these interactions do matter: let's see which one(s):
+  h.3a <- update(h.2, . ~ . - jage:subcat); anova(h.3a, h.2);  # h.3a is worse -> this interaction matters
+  h.3b <- update(h.2, . ~ . - jgen:subcat); anova(h.3b, h.2);  # h.3b is better -> this interaction does not matter
+  h.3c <- update(h.2, . ~ . - jeduc:subcat); anova(h.3c, h.2); # h.3c is better -> this interaction does not matter
+  h.3d <- update(h.2, . ~ . - jasc:subcat); anova(h.3d, h.2);  # h.3d is equal/slightly better -> this interaction does not matter
+  # -> the only interaction that seems to matter is age:
+  h.4 <- update(h.2, . ~ . - jgen:subcat - jeduc:subcat - jasc:subcat); 
+  summary(h.4);
+  anova(h.4, h.2); # equivalent, as expected
+  
+  h.5 <- update(h.4, . ~ . - jgen - jeduc); # jage must stay because of the jage:subcat interaction
+  summary(h.5);
+  anova(h.5, h.4); # equivalent
+  anova(h.5, h.1); # h.5 is still a better fit
+  
+  saveRDS(h.5, file="./cache/glmm_h5.rds", compress="xz");
+} else
+{
+  h.5 <- readRDS("./cache/glmm_h5.rds");
+}
+```
+```{r fig.width=4*2, fig.height=3*2, fig.cap=capFig("Predicted creativity score from a beta regression on for the human judges only is affected by the judge's AReA Score."), warning=FALSE, message=FALSE}
+plot_model(h.5, type="pred", terms=c("jasc", "subcat", "stim")) + ylab("creativity") + ylim(0,1) + xlab("Judge's AReA score") + ggtitle("Predicted creativity (human judges only)");
+```
+
+... yes, mainly their AReA Score: the higher the score, the higher their creativity ratings.
+
+
+## Human drawer characteristics
+
+Just for the human drawers, do their characteristics matter?
+
+```{r}
+if( !file.exists("./cache/glmm_d4.rds") )
+{
+  # computationally expensive, so better to cache the final model:
+  d.0 <- glmmTMB(creab ~ 1 + (1 | iid) + (1 | jid), data=dall[ dall$cat=="H" & !is.na(dall$dage) & !is.na(dall$dgen) & !is.na(dall$deduc) & !is.na(dall$dasc), ], family=beta_family); # artistic field is a bit messy so we leave it out for now...
+  summary(d.0);
+  icc(d.0); # 93.6%
+  round(plogis(fixef(d.0)$cond["(Intercept)"]),2); # the expected creativity score is close to 0.50
+  
+  d.1 <- update(d.0, . ~ . + jtyp * subcat);
+  summary(d.1);
+  anova(d.1, d.0); # d.1 is better
+  d.1a <- update(d.1, . ~ . - jtyp:subcat); anova(d.1a, d.1); #  d.1a is worse -> the interaction matters
+  
+  d.2 <- update(d.1, . ~ . + jtyp * stim);
+  summary(d.2);
+  anova(d.2, d.1); # d.2 is better
+  
+  d.3 <- update(d.2, . ~ . + dage + dgen + deduc + dasc + dage:subcat + dgen:subcat + deduc:subcat + dasc:subcat);
+  summary(d.3);
+  anova(d.3, d.2); # d.3 is better: let's see which new interactions and main effects matter:
+  
+  d.3a <- update(d.3, . ~ . - dage:subcat);  anova(d.3a, d.3); # d.3a is worse -> this interaction matters
+  d.3b <- update(d.3, . ~ . - dgen:subcat);  anova(d.3b, d.3); # d.3b is worse -> this interaction matters
+  d.3c <- update(d.3, . ~ . - deduc:subcat); anova(d.3c, d.3); # d.3c is worse -> this interaction matters
+  d.3d <- update(d.3, . ~ . - dasc:subcat);  anova(d.3d, d.3); # they are pretty much equivalent -> this interaction does not really matter
+  d.3e <- update(d.3d, . ~ . - dasc);  anova(d.3e, d.3); # they are pretty equivalent -> dasc does not matter
+  
+  # so, the best model so far is:
+  d.4 <- update(d.3, . ~ . - dasc - dasc:subcat); 
+  summary(d.4); 
+  anova(d.4, d.3); # d.3 a tiny bit better but not seriously so...
+  
+  saveRDS(d.4, file="./cache/glmm_d4.rds", compress="xz");
+} else
+{
+  d.4 <- readRDS("./cache/glmm_d4.rds");
+}
+```
+
+```{r fig.width=4*2, fig.height=3*2, fig.cap=capFig("Predicted creativity score from a beta regression on for the human dawers only."), warning=FALSE, message=FALSE}
+plot_model(d.4, type="pred", terms=c("jtyp", "subcat", "stim")) + ylab("creativity") + ylim(0,1) + xlab("Judge type") + ggtitle("Predicted creativity (human drawers only)");
+```
+
+```{r fig.width=5, fig.height=4, fig.cap=capFig("Predicted creativity score from a beta regression on for the human dawers only."), warning=FALSE, message=FALSE}
+plot_model(d.4, type="pred", terms=c("dage", "subcat", "dgen")) + ylab("creativity") + ylim(0,1) + xlab("Drawer's age") + ggtitle("Predicted creativity (human drawers only)");
+```
+
+```{r fig.width=5, fig.height=4, fig.cap=capFig("Predicted creativity score from a beta regression on for the human dawers only."), warning=FALSE, message=FALSE}
+plot_model(d.4, type="pred", terms=c("dage", "subcat", "deduc")) + ylab("creativity") + ylim(0,1) + xlab("Drawer's age") + ggtitle("Predicted creativity (human drawers only)");
+```
+
+So, it seems that for the human drawers, being a professional, being older and having less education (?) increases the creativity ratings.
+
+Let's focus now on (a) the visual artists (they have more info) and (b) on the human raters.
+
+
+### The visual artists
+
+```{r}
+if( !file.exists("./cache/glmm_da4.rds") )
+{
+  # computationally expensive, so better to cache the final model:
+  da.0 <- glmmTMB(creab ~ 1 + (1 | iid) + (1 | jid), data=dall[ dall$cat=="H" & dall$subcat=="HVA" & !is.na(dall$dage) & !is.na(dall$dgen) & !is.na(dall$deduc) & !is.na(dall$dasc) & !is.na(dall$dart), ], family=beta_family); # artistic field is a bit messy so we leave it out for now...
+  summary(da.0);
+  icc(da.0); # 94.8%
+  round(plogis(fixef(da.0)$cond["(Intercept)"]),2); # the expected creativity score is close to 0.50
+  
+  da.1 <- update(da.0, . ~ . + jtyp);
+  summary(da.1);
+  anova(da.1, da.0); # judge type does not matter
+  
+  da.2 <- update(da.0, . ~ . + jtyp * stim);
+  summary(da.2);
+  anova(da.2, da.0); # da.2 is better
+  
+  da.3 <- update(da.2, . ~ . + dage + dgen + deduc + dasc + dart);
+  summary(da.3);
+  anova(da.3, da.2); # da.3 is better: let's see which new interactions and main effects matter:
+  
+  da.3a <- update(da.3, . ~ . - dage);  anova(da.3a, da.3); # da.3a is worse -> this matters
+  da.3b <- update(da.3, . ~ . - dgen);  anova(da.3b, da.3); # da.3b is worse -> this matters
+  da.3c <- update(da.3, . ~ . - deduc); anova(da.3c, da.3); # da.3c is worse -> this matters
+  da.3d <- update(da.3, . ~ . - dasc);  anova(da.3d, da.3); # they are pretty much equivalent -> this does not really matter
+  da.3e <- update(da.3, . ~ . - dart);  anova(da.3e, da.3); # they are pretty much equivalent -> this does not really matter
+  
+  # so, the best model so far is:
+  da.4 <- update(da.3, . ~ . - dasc - dart); 
+  summary(da.4); 
+  anova(da.4, da.3); # indeed
+  
+  saveRDS(da.4, file="./cache/glmm_da4.rds", compress="xz");
+} else
+{
+  da.4 <- readRDS("./cache/glmm_da4.rds");
+}
+```
+
+```{r fig.width=4*2, fig.height=3*2, fig.cap=capFig("Predicted creativity score from a beta regression on for the visual artists only."), warning=FALSE, message=FALSE}
+plot_model(da.4, type="pred", terms=c("dage", "jtyp", "stim")) + ylab("creativity") + ylim(0,1) + xlab("Age") + ggtitle("Predicted creativity (visual artists only)");
+```
+
+```{r fig.width=9, fig.height=4, fig.cap=capFig("Predicted creativity score from a beta regression on for the visual artists only."), warning=FALSE, message=FALSE}
+plot_model(da.4, type="pred", terms=c("jtyp", "dgen", "deduc")) + ylab("creativity") + ylim(0,1) + xlab("Judge") + ggtitle("Predicted creativity (visual artists only)");
+```
+
+So, for the visual artists, the AReA score and the number of years of processional work seem to not matter, while being younger, female, and having an MA increases the creativity scores.
+
+
+
+# Conclusions
+
+- there seems to be a *qualitative* difference between human and AI judges, with the guided AI judges somewhere in between,
+- the *human judgments* and the *guided AI judgments* on the 5 questions seem to be captured relatively well by a *single factor*, while the *AI judgments* seem to be better captured by a *2-factor model*,
+- when using a 1FA model for the human, AI and guided AI judgments (so we can meaningfully combine and compare them, while still allowing different loadings for each of them), we find the same qualitative difference, with the *human judges* being very sensitive to the *category and subcategory* of drawing, while the AI is much less so (if at all), and the guided AI partially mimicking the human judgments but with too much noise for any clear-cut pattern to emerge,
+- in particular, the *human judges* seem to score significantly higher the drawing by visual artists, followed by those by naive humans and, very closely, by those by human-inspired AI, with the lowest scores given to the self-generated AI drawings (i.e., *HVA ≫ HNA ≳ HAI ≫ SAI*), with the guided AI showing a similar trend (but completely masked by noise),
+- the *human judges*' judgments are positively affected by the judge's own *AReA score*,
+- for the *human drawers*, being a professional, being older and having less education increases the creativity ratings,
+- however, focusing on the human *visual artists* suggest that being younger, female, and having an MA increases the creativity scores,
+- the particular initial *stimulus* used to generate a drawing statically matters, but, in practice, the differences are very small.
+
+
+# Session information
+
+```{r warning=FALSE, results='asis'}
+if( require(benchmarkme) ) 
+{
+  # CPU:
+  cpu_info <- benchmarkme::get_cpu();
+  if( is.null(cpu_info) )
+  {
+    cat("**CPU:** unknown.\n\n");
+  } else
+  {
+    if( !is.null(cpu_info$model_name) && !is.na(cpu_info$model_name) )
+    {
+      cat(paste0("**CPU:** ",cpu_info$model_name));
+      if( !is.null(cpu_info$no_of_cores) && !is.na(cpu_info$no_of_cores) )
+      {
+        cat(paste0(" (",cpu_info$no_of_cores," threads)"));
+      }
+      cat("\n\n");
+    } else
+    {
+      cat("**CPU:** unknown.\n\n");
+    }
+  }
+  
+  # RAM:
+  ram_info <- benchmarkme::get_ram();
+  if( is.null(ram_info) || is.na(ram_info) )
+  {
+    cat("**RAM (memory):** unknown.\n\n");
+  } else
+  {
+    cat("**RAM (memory):** "); print(ram_info); cat("\n");
+  }
+} else
+{
+  cat("**RAM (memory):** cannot get info (try installing package 'benchmarkme').\n\n");
+}
+```
+
+```{r}
+pander::pander(sessionInfo());
+```
+
+```{r}
+if( exists("start_time_force_compute_all") )
+{
+  cat(paste0("\n\n**Note: the full computation took ", round(difftime(Sys.time(), start_time_force_compute_all, units="mins"), 2), " minutes on this machine.**\n\n"))
+}
+
+```
+
+
+# Bibliography
+
+
+
+
+
+
+
+

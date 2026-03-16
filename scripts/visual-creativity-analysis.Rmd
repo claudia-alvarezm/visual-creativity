@@ -15,10 +15,11 @@ output:
 editor_options: 
   chunk_output_type: console
 knit: (function(input, ...) {
-    )
     rmarkdown::render(
       input,
       output_dir = "../results"
+    )
+  })
 ---
 
 ```{r setup, include=FALSE}
@@ -126,7 +127,7 @@ capFig = function(x, show_R_version=TRUE, show_package_versions=NULL, is_map=FAL
 
 ```
 
-```{r}
+```{r prepare labels and colour palettes for visualization}
 # Store the labels that we want to use for the different categories
 categoryLabels <- c('Visual Artists', 'Non Artists', 'Human Inspired GenAI', 'Self-Guided GenAI')
 
@@ -276,12 +277,8 @@ names(bdGpt) <- c('category', 'imageId', 'liking', 'vividness', 'originality', '
 rm(filesRaw, xx)
 
 ## Factor category ####
-bdGpt$category <- factor(bdGpt$category, labels=categoryLabels) # CHECK WITH SILVIA: ADD LABELS
+bdGpt$category <- factor(bdGpt$category, labels=categoryLabels) 
 bdGpt$category2 <- factor(ifelse(bdGpt$category %in% categoryLabels[1:2], 'Humans', 'GenAI'), levels=c('Humans', 'GenAI'))
-
-
-
-
 
 
 ```
@@ -388,6 +385,10 @@ bd$category2 <- factor(ifelse(bd$category %in% categoryLabels[1:2], 'Humans', 'G
 bd$raterType <- factor(bd$raterType, levels=c('Human', 'GPT', 'GuidedGPT'))
 
 ```
+
+
+
+
 
 
 ```{r generate creativity score, eval = eval_data_cleaning}
@@ -516,6 +517,24 @@ load('data/processed/turing-test-data.RData')
 
 ```
 
+
+```{r add type of used pattern to each image}
+
+# We have the information regarding the patterns used to generate each image. I'll add it to the main
+# database
+
+aiImagesInfo <- read.csv("data/processed/drawings-info-ai.csv", sep="\t");
+humanImagesInfo <- read.csv("data/processed/drawings-and-drawers-info-human.csv", sep="\t");
+
+aiImagesInfo <- aiImagesInfo[,c('imageId', 'stimulus')]
+humanImagesInfo <- humanImagesInfo[,c('imageId', 'stimulus')]
+
+imagesInfo <- rbind(aiImagesInfo, humanImagesInfo)
+imagesInfo$stimulus <- factor(imagesInfo$stimulus)
+
+bd <- merge(bd, imagesInfo, by='imageId', all.x=T)
+rm(aiImagesInfo, humanImagesInfo, imagesInfo)
+```
 
 
 ```{r histogram figure s1}
@@ -2051,6 +2070,36 @@ ggarrange(plotArea, get_legend(legendCategory + theme(legend.position='bottom', 
 ```
 
 
+# Effect of pattern
+
+```{r}
+
+modelStimType <- lmer(creativity ~ (stimulus + category + raterType)^2 + (1|imageId), data=bd)
+
+
+modelStimTypeSummary <- rbind(c('Fixed effects', '', '', '', '', ''),
+                                 c('', 'Est/Beta', 'SE', '95% CI', 't', 'p value'),
+                                 c('Group', '', '', '', '', ''),
+                                 cbind(c(rownames(summary(modelStimType)$coefficients)),
+                                       round(summary(modelStimType)$coefficients[,1:2], 2),
+                                       apply( round(confint(modelStimType, method='Wald')[3:nrow(confint(modelStimType, method='Wald')),], 2), 1 , paste , collapse = " - " ),
+                                       round(summary(modelStimType)$coefficients[,4], 2),
+                                       round(summary(modelStimType)$coefficients[,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Random effects', '', '', '', '', ''),
+                                 c('', '', '', '', 'Variance', 'S.D.'),
+                                 c('Image (Intercept)', '', '', '', round(as.data.frame(VarCorr(modelStimType))[1,4], 3), round(as.data.frame(VarCorr(modelStimType))[1,5], 3)),
+                                 c('', '', '', '', '', ''),
+                                 c('Model fit', '', '', '', '', ''),
+                                 c('', '', '', '', 'Marginal', 'Conditional'),
+                                 c('R2', '', '', '', round(performance::r2(modelStimType)$R2_marginal,2), round(performance::r2(modelStimType)$R2_conditional, 2)))
+
+
+
+```
+
+
+
 
 ```{r save all summary tables into excel}
 
@@ -2089,6 +2138,7 @@ add_table(wb, "Table S18", modelsCategorySummaries$GuidedGPT$aesthetics)
 add_table(wb, "Table S19", modelsCategorySummaries$GuidedGPT$curiosity)
 
 add_table(wb, "Table S20", modelRaterCategorySummary)
+add_table(wb, "Table S21", modelStimTypeSummary)
 add_table(wb, "Table S22", modelAreaCategorySummary)
 
 saveWorkbook(wb, "results/tables/table-summaries.xlsx", overwrite = TRUE)
