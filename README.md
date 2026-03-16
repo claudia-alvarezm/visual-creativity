@@ -32,16 +32,6 @@ This repository contains the scripts used to compute creativity scores and repro
 
 ------------------------------------------------------------------------
 
-## Main finding
-
-We observed a clear creativity gradient:
-
-**Visual Artists \> Non-Artists ≥ Human-Inspired GenAI \> Self-Guided GenAI**
-
-Human guidance substantially improved AI creative output, bringing it close to the level of non-artists.
-
-------------------------------------------------------------------------
-
 ## Repository structure
 
 `scripts/   R Markdown scripts containing the statistical analyses`
